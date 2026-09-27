@@ -12,6 +12,11 @@ const MAX_AI_TURNS = 4;
 const PRONUNCIATION = 'pronunciation'; // say the Mandarin term: checked against the expected characters
 const ANSWER = 'answer'; // answer or converse: checked for meaning, wording is free
 
+// On-screen form of the term: characters, plus the source pinyin when there is one.
+function withPinyin(entry) {
+  return entry.pinyin ? `${entry.mandarin} — ${entry.pinyin}` : entry.mandarin;
+}
+
 // The recogniser's guess that contains the term, if any, else its top guess.
 function bestCandidate(heard, entry) {
   const all = [heard.text, ...(heard.alternatives ?? [])].filter(Boolean);
@@ -277,7 +282,7 @@ export class Tutor {
   #explain(reply, entry) {
     reply.en(`Let's go over it again. The English term is ${entry.english}.`);
     reply.en('In Mandarin:').zh(entry.mandarin);
-    reply.zh(entry.mandarin, { rate: 0.6, show: `Pinyin: ${entry.pinyin}` });
+    reply.zh(entry.mandarin, { rate: 0.6, show: entry.pinyin ? `Pinyin: ${entry.pinyin}` : entry.mandarin });
     if (entry.meaning) reply.en(`The JH Medics meaning is: ${entry.meaning}`);
     else reply.en(`The JH Medics meaning for this entry has not been loaded yet, so I will only use the English term: ${entry.english}.`);
   }
@@ -312,7 +317,7 @@ export class Tutor {
     const entry = store.entryById(this.db, r.current);
     if (r.step === 'repeat') {
       if (intent.type === 'forgot' || intent.type === 'dontUnderstand') {
-        reply.en('Listen.').zh(entry.mandarin, { rate: 0.6, show: `${entry.mandarin} — ${entry.pinyin}` });
+        reply.en('Listen.').zh(entry.mandarin, { rate: 0.6, show: withPinyin(entry) });
         reply.prompt().en('Say it after me.').ask('zh-CN', PRONUNCIATION);
         return;
       }
@@ -352,7 +357,7 @@ export class Tutor {
       });
       if (!session.words_reviewed.includes(entry.id)) session.words_reviewed.push(entry.id);
       await this.#pronunciationFeedback(reply, session, entry, check, intent.heard);
-      reply.zh(entry.mandarin, { show: `${entry.mandarin} — ${entry.pinyin}` });
+      reply.zh(entry.mandarin, { show: withPinyin(entry) });
       this.#nextReview(reply, course, session, progress);
       return;
     }
@@ -372,7 +377,7 @@ export class Tutor {
     this.#markWeak(session, entry);
     if (!r.requeued.includes(entry.id)) { r.requeued.push(entry.id); r.queue.push(entry.id); }
     reply.en(forgot ? `The answer is:` : `The correct answer for "${entry.english}" is:`);
-    reply.zh(entry.mandarin, { show: `${entry.mandarin} — ${entry.pinyin}` });
+    reply.zh(entry.mandarin, { show: withPinyin(entry) });
     Object.assign(r, { step: 'repeat', repeats: 0 });
     reply.prompt().en('Say it after me.').zh(entry.mandarin, { rate: 0.7 }).ask('zh-CN', PRONUNCIATION);
   }
@@ -403,7 +408,8 @@ export class Tutor {
     reply.en(jump ? `Word ${entry.position} of ${total}, as a side trip.` : `Word ${entry.position} of ${total}.`);
     reply.en(`The English term is: ${entry.english}.`);
     reply.en('In Mandarin:').zh(entry.mandarin);
-    reply.en('Pinyin:').zh(entry.mandarin, { rate: 0.6, show: entry.pinyin });
+    if (entry.pinyin) reply.en('Pinyin:').zh(entry.mandarin, { rate: 0.6, show: entry.pinyin });
+    else reply.en('The JH Medics source gives no pinyin for this entry.');
     if (entry.meaning) reply.en(`Meaning, from JH Medics: ${entry.meaning}`);
     else reply.en('The JH Medics meaning for this entry has not been loaded yet.');
     this.#askPronounce(reply, entry);
@@ -427,7 +433,7 @@ export class Tutor {
 
   async #stepPronounce(reply, session, l, entry, intent) {
     if (intent.type === 'forgot') {
-      reply.en('Listen carefully.').zh(entry.mandarin, { rate: 0.6, show: `${entry.mandarin} — ${entry.pinyin}` });
+      reply.en('Listen carefully.').zh(entry.mandarin, { rate: 0.6, show: withPinyin(entry) });
       reply.prompt().en('Your turn.').ask('zh-CN', PRONUNCIATION);
       return;
     }
@@ -443,7 +449,7 @@ export class Tutor {
   // Slows down as Roy keeps trying: whole word, then syllable by syllable.
   #modelPronunciation(reply, entry, attempts) {
     if (attempts < 3) {
-      reply.en('Listen again.').zh(entry.mandarin, { rate: 0.6, show: `${entry.mandarin} — ${entry.pinyin}` });
+      reply.en('Listen again.').zh(entry.mandarin, { rate: 0.6, show: withPinyin(entry) });
       return;
     }
     reply.en("Let's take it one syllable at a time.");
@@ -451,13 +457,13 @@ export class Tutor {
     [...normZh(entry.mandarin)].forEach((char, i) => {
       reply.zh(char, { rate: 0.5, show: syllables[i] ? `${char} ${syllables[i]}` : char });
     });
-    reply.en('Now the whole term:').zh(entry.mandarin, { rate: 0.6, show: `${entry.mandarin} — ${entry.pinyin}` });
+    reply.en('Now the whole term:').zh(entry.mandarin, { rate: 0.6, show: withPinyin(entry) });
   }
 
   async #pronunciationFeedback(reply, session, entry, check, heard) {
     if (check.typed) {
       if (check.passed) reply.en("That's the right word. Say it out loud when you can, so I can check your pronunciation.");
-      else reply.en(`You typed "${check.heard}". The term is`).zh(entry.mandarin, { show: `${entry.mandarin} — ${entry.pinyin}` });
+      else reply.en(`You typed "${check.heard}". The term is`).zh(entry.mandarin, { show: withPinyin(entry) });
       return;
     }
     if (check.verdict === 'correct') {
@@ -713,7 +719,7 @@ export class Tutor {
     if (!used) {
       l.mistakes += 1;
       reply.en(royText ? `I heard "${royText}". Remember to use the term:` : 'Remember to use the term:');
-      reply.zh(entry.mandarin, { show: `${entry.mandarin} — ${entry.pinyin}` });
+      reply.zh(entry.mandarin, { show: withPinyin(entry) });
       reply.en('Try that line again.');
       this.#scriptedTurn(reply, session, entry);
       return;

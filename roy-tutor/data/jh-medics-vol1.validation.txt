@@ -1,0 +1,101 @@
+Source rows: 385  JSON entries: 385  Pages: 31
+Failures: 0
+Notes for review: 97
+  NOTE #42 (High Density Lipoproteins (HDL) (good cholesterol): unmatched bracket in english: High Density Lipoproteins (HDL) (good cholesterol
+  NOTE #55 (amputation): separator dropped at a part edge: '-' in '截肢- jié zhī'
+  NOTE #63 (arteriosclerosis): several Mandarin forms in one cell, joined with " / ": 动脉粥样硬化 / 动脉硬化 | dòngmàizhōuyàngyìnghuà / (dòngmàiyìnghuà)
+  NOTE #81 (blood pressure): separator dropped at a part edge: '-' in '血压- xuè yā'
+  NOTE #85 (blood thinner / anticoagulant): several Mandarin forms in one cell, joined with " / ": 血稀释剂 / 抗凝剂 | xuè xī shì jì / kàng níng jì
+  NOTE #133 (crib death): separator dropped at a part edge: '-' in '婴儿猝死综合征- yīng ér cù sǐ zōng hé zhēng'
+  NOTE #143 (Dilation and Curettage (D & C): unmatched bracket in english: Dilation and Curettage (D & C
+  NOTE #144 (Diphtheria, Pertussis and Tetanus (DPT): unmatched bracket in english: Diphtheria, Pertussis and Tetanus (DPT
+  NOTE #145 (discharge instructions): several Mandarin forms in one cell, joined with " / ": 办理手续 / 出院指导 | bàn lǐ shǒu xù / chū yuàn zhǐ dǎo
+  NOTE #146 (discharge (from hospita): unmatched bracket in english: discharge (from hospita
+  NOTE #146 (discharge (from hospita): several Mandarin forms in one cell, joined with " / ": 释放 / 出院 | shì fàng / chū yuàn
+  NOTE #151 (dosage): several Mandarin forms in one cell, joined with " / ": 剂量 / 计量 | jì liàng
+  NOTE #158 (Ear, nose and throat doctor (ENT) otorhinolaryngologist): separator dropped at a part edge: '-' in '耳，鼻，喉科医生- ěr, bí, hóu kē yī shēng'
+  NOTE #161 (electrocardiogram, EKG): no pinyin in the source
+  NOTE #163 (electroencephalography): no pinyin in the source
+  NOTE #168 (emotions): separator dropped at a part edge: ',' in '情绪 qíng xù, 情感qínggǎn'
+  NOTE #168 (emotions): several Mandarin forms in one cell, joined with " / ": 情绪 / 情感 | qíng xù / qínggǎn
+  NOTE #174 (incision): separator dropped at a part edge: ',' in '刀口dāo kǒu, 手术 切口 (shǒushù qiēkǒu)\n\n'
+  NOTE #174 (incision): several Mandarin forms in one cell, joined with " / ": 刀口 / 手术 切口 | dāo kǒu / (shǒushù qiēkǒu)
+  NOTE #195 (loose): separator dropped at a part edge: '-' in '松- sōng'
+  NOTE #196 (Low Density Lipoproteins (LDL) (bad cholesterol)): several Mandarin forms in one cell, joined with " / ": 低迷度脂蛋白 / 坏胆固醇 | dī mí dù zhī dàn bái / huài dǎn gù chún
+  NOTE #212 (milk pump (breast)): separator dropped at a part edge: '-' in '吸奶器- xī nǎi qì'
+  NOTE #224 (Neurological System): separator dropped at a part edge: '-' in '神经系统 (shén jīng xì tǒng) -'
+  NOTE #229 (nutrients): several Mandarin forms in one cell, joined with " / ": 营养物 / 养分 | (yíng yǎng wù) / (yǎng fèn)
+  NOTE #233 (oedema, edema): several Mandarin forms in one cell, joined with " / ": 浮肿 / 肿胀 | (fú zhǒng) / (zhǒng zhàng)
+  NOTE #234 (ointment): several Mandarin forms in one cell, joined with " / ": 药膏 / 油膏 | (yào gāo) / (yóu gāo)
+  NOTE #236 (on-duty): several Mandarin forms in one cell, joined with " / ": 值班 / 上班 | (zhí bān) / (shàng bān)
+  NOTE #239 (outgrow): unmatched bracket in pinyin: zhǎng dà)
+  NOTE #240 (outlet): several Mandarin forms in one cell, joined with " / ": 出口 / 求助 | (chū kǒu) / (qiú zhù)
+  NOTE #245 (pap smear test): unmatched bracket in pinyin: (tú piàn jiǎn chá) / (zǐ gōng jǐng mǒ piàn jiǎn chá
+  NOTE #245 (pap smear test): several Mandarin forms in one cell, joined with " / ": 涂片检查 / 子宫颈抹片检查 | (tú piàn jiǎn chá) / (zǐ gōng jǐng mǒ piàn jiǎn chá
+  NOTE #249 (Perineal/ Perineum): unmatched bracket in pinyin: (huì yīn
+  NOTE #253 (physical exam): unmatched bracket in pinyin: (tǐ gé jiǎn chá) / (tǐ jiǎn
+  NOTE #253 (physical exam): several Mandarin forms in one cell, joined with " / ": 体格检查 / 体检 | (tǐ gé jiǎn chá) / (tǐ jiǎn
+  NOTE #256 (pins & needles): unmatched bracket in pinyin: (fā má) / (má mù
+  NOTE #256 (pins & needles): several Mandarin forms in one cell, joined with " / ": 发麻 / 麻木 | (fā má) / (má mù
+  NOTE #259 (podiatrist): several Mandarin forms in one cell, joined with " / ": 足病医师 / 足病医生 | (zú bìng yī shī) / (zú bìng yī shēng)
+  NOTE #261 (portions): several Mandarin forms in one cell, joined with " / ": 部分 / （食物部分） / 份 | (bù fèn)
+  NOTE #264 (Pregnancy): several Mandarin forms in one cell, joined with " / ": 孕期 / 怀孕 | (yùn qī) / huái yùn
+  NOTE #265 (Prenatal Care): several Mandarin forms in one cell, joined with " / ": 孕期保健 / 产前检查 | (yùn qī bǎo jiàn) / (chǎn qián jiǎn chá)
+  NOTE #266 (prescription): several Mandarin forms in one cell, joined with " / ": 药房 / 处方药 | (yào fáng) / (chǔ fāng yào)
+  NOTE #268 (prognosis): unmatched bracket in pinyin: (yù hòu
+  NOTE #274 (recovered): unmatched bracket in pinyin: huī fù)
+  NOTE #276 (redness): several Mandarin forms in one cell, joined with " / ": 红色 / 发红 | (hóng sè) / (fā hóng)
+  NOTE #278 (refills): unmatched bracket in pinyin: (tì huàn de yào) / zài zhuāng mǎn)
+  NOTE #278 (refills): several Mandarin forms in one cell, joined with " / ": 替换的药 / 再装满 | (tì huàn de yào) / zài zhuāng mǎn)
+  NOTE #279 (regular (bowel)): unmatched bracket in pinyin: dà biàn tōng chàng)
+  NOTE #285 (scar): unmatched bracket in pinyin: (shāng hén) / (bān hén
+  NOTE #285 (scar): several Mandarin forms in one cell, joined with " / ": 伤痕 / 瘢痕 | (shāng hén) / (bān hén
+  NOTE #289 (Sexually Transmitted Infection/Disease (STI/STD): unmatched bracket in english: Sexually Transmitted Infection/Disease (STI/STD
+  NOTE #293 (shot): unmatched bracket in pinyin: zhēn)
+  NOTE #296 (sole of the foot): several Mandarin forms in one cell, joined with " / ": 脚底 / 足底 | (jiǎo dǐ) / (zú dǐ)
+  NOTE #297 (sonogram): unmatched bracket in pinyin: (shēng pǔ tú
+  NOTE #298 (sore throat): several Mandarin forms in one cell, joined with " / ": 咽痛,喉咙痛 / 嗓子痛 | (yān tòng) (hóu lóng tòng) (sǎng zi tòng)
+  NOTE #299 (spine): several Mandarin forms in one cell, joined with " / ": 脊柱 / 脊梁 | (jǐ zhù) / (jǐ liáng)
+  NOTE #301 (spleen): unmatched bracket in pinyin: (pí zàng
+  NOTE #307 (stool softener): unmatched bracket in pinyin: (dà biàn ruǎn huà jì
+  NOTE #308 (Strep throat): unmatched bracket in pinyin: (liàn qiú jūn xìng yān hóu yán
+  NOTE #315 (supplements): unmatched bracket in pinyin: (bǔ chōng zī liào) / (zēng bǔ
+  NOTE #315 (supplements): several Mandarin forms in one cell, joined with " / ": 补充资料 / 增补 | (bǔ chōng zī liào) / (zēng bǔ
+  NOTE #322 (TB skin test): unmatched bracket in pinyin: jié hé bìng pí fū shì yàn)
+  NOTE #323 (tearing): unmatched bracket in pinyin: ((sī liè)
+  NOTE #324 (tendernes): unmatched bracket in pinyin: (wēn róu) / (róu qíng) / (yā tòng
+  NOTE #324 (tendernes): several Mandarin forms in one cell, joined with " / ": 温柔 / 柔情 / 压痛 | (wēn róu) / (róu qíng) / (yā tòng
+  NOTE #326 (throbbing pain): unmatched bracket in pinyin: chōu tòng)
+  NOTE #329 (tissue): separator dropped at a part edge: '-' in '组织 (zǔ zhī) -'
+  NOTE #333 (tracheostomy, tracheotomy): separator dropped at a part edge: '-' in '气管切开术 (qì guǎn qiē kāi shù) -'
+  NOTE #334 (triage nurse): unmatched bracket in pinyin: (fēn zhěn hù shì
+  NOTE #335 (triglycerides): unmatched bracket in pinyin: (gān yóu sān zhǐ
+  NOTE #341 (urinalysis): several Mandarin forms in one cell, joined with " / ": 尿检 / 尿分析 | (niào jiǎn) / (niào fēn xī)
+  NOTE #343 (Urinary Tract Infection (UTI)): unmatched bracket in pinyin: niào lù gǎn rǎn)
+  NOTE #346 (urine test): unmatched bracket in pinyin: (niào yè shí yàn
+  NOTE #346 (urine test): several Mandarin forms in one cell, joined with " / ": 尿液实验 / 尿检 | (niào yè shí yàn
+  NOTE #348 (vaccination/vaccine): unmatched bracket in pinyin: (yì miáo
+  NOTE #351 (varicose veins): unmatched bracket in pinyin: (jìng mài qū zhāng
+  NOTE #353 (vital signs): unmatched bracket in pinyin: (shēng mìng tǐ zhēng
+  NOTE #354 (wart): unmatched bracket in pinyin: (hóu zi) / (ròu zhuì) / (yóu zhuì
+  NOTE #354 (wart): several Mandarin forms in one cell, joined with " / ": 瘊子 / 肉赘 / 疣赘 | (hóu zi) / (ròu zhuì) / (yóu zhuì
+  NOTE #364 (Metal implants, pins, screw, or plates): unmatched bracket in pinyin: (jīn shǔ zhí rù wù, (xiāo dīng) (luó dīng)
+  NOTE #369 (Chemotherapy port): unmatched bracket in pinyin: ((huà liáo duān kǒu)
+  NOTE #370 (Lumbar shunt): unmatched bracket in pinyin: ((yāo zhuī fēn liú shù)
+  NOTE #374 (Eye injuries): unmatched bracket in pinyin: (yǎn jīng shòu shāng
+  NOTE #377 (Aneurysm clips): unmatched bracket in pinyin: (dòng mài liú jiā
+  NOTE #378 (IVC (inferior vena cava) filter): unmatched bracket in pinyin: (xià qiāng jìng mài lǜ qì
+  NOTE #382 (Dental implants): unmatched bracket in pinyin: (zhòng zhí yá
+  NOTE repeated mandarin "眼科医生" at positions [4, 237] (kept, as in the source)
+  NOTE repeated mandarin "德国麻疹" at positions [22, 283] (kept, as in the source)
+  NOTE repeated mandarin "高血糖" at positions [41, 49] (kept, as in the source)
+  NOTE repeated mandarin "血糖" at positions [79, 83] (kept, as in the source)
+  NOTE repeated mandarin "拘挛" at positions [116, 131] (kept, as in the source)
+  NOTE repeated mandarin "营养师" at positions [141, 230] (kept, as in the source)
+  NOTE repeated mandarin "心电图" at positions [160, 161] (kept, as in the source)
+  NOTE repeated mandarin "脑电图" at positions [162, 163] (kept, as in the source)
+  NOTE repeated mandarin "肾结石" at positions [187, 188] (kept, as in the source)
+  NOTE repeated mandarin "神经系统" at positions [223, 224] (kept, as in the source)
+  NOTE repeated mandarin "非处方药" at positions [225, 242] (kept, as in the source)
+  NOTE repeated mandarin "射痛" at positions [292, 304] (kept, as in the source)
+VALIDATION PASSED

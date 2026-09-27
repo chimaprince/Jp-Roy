@@ -373,3 +373,31 @@ test('sentence and role-play repeat until the term is used', async () => {
   const done = await tutor.message('这是硬膜外', voice('这是硬膜外'));
   assert.match(spoken(done), /Word 1 complete/);
 });
+
+// ---------- the real Volume 1 file ----------
+
+test('JH Medics Volume 1 data file: 385 entries in source order', async () => {
+  const fs = await import('node:fs');
+  const vol1 = JSON.parse(fs.readFileSync(new URL('../data/jh-medics-vol1.json', import.meta.url), 'utf8'));
+  const db = openDb(':memory:');
+  upsertCourse(db, { id: 'jh-medics-vol1', title: 'JH Medics Volume 1', volume: 1, status: 'active' });
+  const r = importEntries(db, 'jh-medics-vol1', vol1.entries);
+  assert.ok(r.ok, r.errors.join(', '));
+  assert.equal(r.count, 385);
+  const first = [1, 2, 3, 4, 5].map((p) => entryAt(db, 'jh-medics-vol1', p));
+  assert.deepEqual(first.map((e) => e.english), ['epidural', 'esophagus', 'excrement', 'eye specialist', 'fainting']);
+  assert.deepEqual(first.map((e) => e.mandarin), ['硬膜外', '食道', '大便', '眼科医生', '晕倒']);
+  assert.equal(first[0].pinyin, 'yìng mó wài');
+  assert.equal(first[0].source_page, '1');
+  assert.match(first[0].meaning, /^Injection of a substance into a person's spine/);
+  const last = entryAt(db, 'jh-medics-vol1', 385);
+  assert.equal(last.english, 'Neuropathy');
+  assert.equal(last.mandarin, '神经病');
+  assert.equal(entryAt(db, 'jh-medics-vol1', 11).english, 'Regular physical examintion', 'source spelling kept');
+  assert.equal(entryAt(db, 'jh-medics-vol1', 161).pinyin, '', 'no pinyin invented');
+
+  const tutor = new Tutor({ db, now: () => new Date('2026-09-27T10:00:00') });
+  const start = await tutor.start();
+  assert.match(spoken(start), /Word 1 of 385\./);
+  assert.equal(start.status.total, 385);
+});

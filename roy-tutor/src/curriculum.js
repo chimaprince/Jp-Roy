@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-const REQUIRED = ['english', 'mandarin', 'pinyin'];
+const REQUIRED = ['english', 'mandarin'];
 
 // Minimal RFC 4180 CSV parser (quoted fields, escaped quotes, newlines in quotes).
 export function parseCsv(text) {
@@ -53,12 +53,14 @@ export function validateEntries(rawEntries) {
       if (typeof e[key] !== 'string' || e[key] === '') errors.push(`position ${e.position}: missing ${key}`);
     }
     const blank = (v) => v === undefined || v === null || v === '';
+    if (blank(e.pinyin)) warnings.push(`position ${e.position} (${e.english}): no pinyin in the source`);
+    else if (typeof e.pinyin !== 'string') errors.push(`position ${e.position}: pinyin must be text`);
     if (blank(e.meaning)) warnings.push(`position ${e.position} (${e.english}): no JH Medics meaning supplied`);
     return {
       position,
       english: e.english,
       mandarin: e.mandarin,
-      pinyin: e.pinyin,
+      pinyin: blank(e.pinyin) ? '' : e.pinyin,
       meaning: blank(e.meaning) ? null : String(e.meaning),
       source_page: blank(e.source_page) ? null : String(e.source_page),
     };

@@ -19,7 +19,7 @@ function entryBlock(entry, known) {
   return `Current term (JH Medics Volume 1, entry ${entry.position}):
 English: ${entry.english}
 Mandarin: ${entry.mandarin}
-Pinyin: ${entry.pinyin}
+Pinyin: ${entry.pinyin || '(not given in the source)'}
 Meaning: ${entry.meaning ?? '(not supplied by the source)'}
 Known terms Roy has already completed: ${knownList}`;
 }

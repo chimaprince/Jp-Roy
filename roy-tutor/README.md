@@ -113,7 +113,7 @@ weak) and `study_sessions` (words studied, words reviewed, weak words, summary).
 
 ## Curriculum
 
-See [`data/README.md`](data/README.md). **Only entry 1 is loaded so far, and its
-meaning is blank** because the JH Medics wording wasn't provided. Add the full
-volume to `data/jh-medics-vol1.json`, or import a CSV, and restart. Volume 2 is
-not loaded. The steps to add it later are in the same file.
+All 385 entries of JH Medics Volume 1 are loaded from the source Word
+document, in book order, with page numbers. See [`data/README.md`](data/README.md)
+for how they were extracted and checked. Volume 2 is not loaded; the steps to add
+it later are in the same file.

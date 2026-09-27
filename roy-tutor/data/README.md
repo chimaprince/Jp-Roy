@@ -6,21 +6,31 @@ is listed, and it is the only `active` course. Volume 2 must not be listed yet.
 `jh-medics-vol1.json` is the source of truth for the curriculum. Entries are
 taught strictly by `position`, from 1 to the last entry.
 
-## Status of the Volume 1 file
+## Volume 1 source and how it was imported
 
-Only entry 1 (`epidural` / `硬膜外` / `yìng mó wài`) is in the file so far. Its
-`meaning` and `source_page` are `null` because the JH Medics wording was not
-supplied, and the app must not invent one. The tutor says the meaning has not
-been loaded yet instead of making one up.
+- Source: `source/JH_MEDICS_TRAINING_MANDARIN11.docx` (31 pages, one table of
+  385 rows: English | Mandarin + pinyin | Meaning).
+- `jh-medics-vol1.json` is generated from it, one entry per table row, in row order:
 
-To load the full volume, replace `entries` with every entry from the book, in
-book order, and run `npm run import`. You can also import a CSV:
+  ```
+  python3 scripts/extract_jh_docx.py data/source/JH_MEDICS_TRAINING_MANDARIN11.docx data/jh-medics-vol1.json
+  npm run import
+  python3 scripts/validate_jh_import.py data/source/JH_MEDICS_TRAINING_MANDARIN11.docx data/jh-medics-vol1.json tutor.db
+  ```
 
-```
-npm run import -- --file data/jh-medics-vol1.csv --course jh-medics-vol1
-```
-
-CSV columns: `position,english,mandarin,pinyin,meaning,source_page`.
+- Each entry keeps the document's raw cells under `source`, so any entry can
+  be checked against the Word table.
+- What the extractor changes, and nothing more: outer spaces are trimmed, line
+  breaks inside English and Meaning cells become a space, and the Mandarin cell
+  is split into Chinese (`mandarin`) and Latin-letter (`pinyin`) parts. A cell
+  with several parts is joined with " / ". A separator ("-" or ",") left
+  dangling at the edge of a part is dropped, and the validator lists each one.
+- Page numbers come from Word's last saved layout. They run 1–31, which matches
+  the document's own page count.
+- `jh-medics-vol1.validation.txt` is the latest validation report. The source
+  is kept as written, including typos (for example "examintion", "tendernes"),
+  unmatched brackets, repeated entries and two entries with no pinyin
+  (161, 163). The report lists all of them for review.
 
 ## Rules the importer enforces
 
@@ -28,8 +38,8 @@ CSV columns: `position,english,mandarin,pinyin,meaning,source_page`.
   re-spelled or "corrected". An entry that looks odd stays as it is.
 - Positions must be unique whole numbers starting at 1 with no gaps. If they
   are not, the import stops and changes nothing.
-- `english`, `mandarin` and `pinyin` are required. `meaning` and `source_page`
-  may be empty, and the importer prints which entries have no meaning.
+- `english` and `mandarin` are required. `pinyin`, `meaning` and
+  `source_page` may be empty; the importer prints which entries lack them.
 - Re-importing keeps each entry's database id (matched by course + position),
   so Roy's progress is kept.
 
