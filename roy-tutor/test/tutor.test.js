@@ -401,3 +401,16 @@ test('JH Medics Volume 1 data file: 385 entries in source order', async () => {
   assert.match(spoken(start), /Word 1 of 385\./);
   assert.equal(start.status.total, 385);
 });
+
+test('typed answers in a pronunciation exercise are labelled as text fallback', async () => {
+  const { tutor } = setup();
+  await tutor.start();
+  const wrong = await tutor.message('硬膜', { source: 'text' });
+  assert.match(spoken(wrong), /Text fallback: you typed "硬膜"/);
+  assert.match(spoken(wrong), /Pronunciation was not tested/);
+  assert.equal(wrong.mode, 'pronunciation', 'asks again');
+  const right = await tutor.message('硬膜外', { source: 'text' });
+  assert.match(spoken(right), /Text fallback: that is the right word\. Pronunciation was not tested/);
+  assert.doesNotMatch(spoken(right), /Correct! I heard/);
+  assert.equal(right.mode, 'answer');
+});

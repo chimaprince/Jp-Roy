@@ -462,8 +462,9 @@ export class Tutor {
 
   async #pronunciationFeedback(reply, session, entry, check, heard) {
     if (check.typed) {
-      if (check.passed) reply.en("That's the right word. Say it out loud when you can, so I can check your pronunciation.");
-      else reply.en(`You typed "${check.heard}". The term is`).zh(entry.mandarin, { show: withPinyin(entry) });
+      // Typed input is a stand-in for the microphone: it checks the word, never pronunciation.
+      if (check.passed) reply.en('Text fallback: that is the right word. Pronunciation was not tested, because typing cannot test it.');
+      else reply.en(`Text fallback: you typed "${check.heard}". That is not the term. Pronunciation was not tested. The term is`).zh(entry.mandarin, { show: withPinyin(entry) });
       return;
     }
     if (check.verdict === 'correct') {
@@ -586,7 +587,7 @@ export class Tutor {
       ok = used && longer;
       if (ok) reply.en('Good, you used').zh(entry.mandarin).en('in a sentence.');
       else if (used) reply.en('You said the word. Now put it in a full sentence.');
-      else reply.en(`I heard "${sentence}". Your sentence needs to include`).zh(entry.mandarin);
+      else reply.en(`${intent.heard.source === 'voice' ? 'I heard' : 'You typed'} "${sentence}". Your sentence needs to include`).zh(entry.mandarin);
     }
     if (ok) return this.#startConversation(reply, course, session);
     if (l.attempts <= 2) l.mistakes += 1;
@@ -718,7 +719,8 @@ export class Tutor {
     }
     if (!used) {
       l.mistakes += 1;
-      reply.en(royText ? `I heard "${royText}". Remember to use the term:` : 'Remember to use the term:');
+      const heardVerb = intent.heard.source === 'voice' ? 'I heard' : 'You typed';
+      reply.en(royText ? `${heardVerb} "${royText}". Remember to use the term:` : 'Remember to use the term:');
       reply.zh(entry.mandarin, { show: withPinyin(entry) });
       reply.en('Try that line again.');
       this.#scriptedTurn(reply, session, entry);
