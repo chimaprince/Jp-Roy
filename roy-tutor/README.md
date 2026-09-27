@@ -10,15 +10,19 @@ Needs Node 22.5 or later (uses the built-in `node:sqlite`).
 ```
 cd roy-tutor
 npm install
-npm start            # http://localhost:3000
+cp .env.example .env      # then put your key after OPENAI_API_KEY=
+npm start                 # http://localhost:3000
 npm test
 ```
 
-Open the page in Chrome or Edge, since those browsers support speech input. Press **🎙 START TALKING**.
-The tutor speaks, then the microphone opens in the language it expects the answer
-in (Mandarin or English).
+On startup the terminal shows `Environment file: .env (set: OPENAI_API_KEY, ...)`,
+`OPENAI_API_KEY: set (value not shown)` and `AI teacher: OpenAI, model ...`.
+Every turn then logs a `[teacher] -> OpenAI chat.completions ...` line and the
+reply's id. `.env` is ignored by Git; never commit it.
 
-### Environment variables (server only)
+Open the page in Chrome or Edge (speech input). Press **🎙 START TALKING**.
+
+### Settings (server only; in `.env` or the shell)
 
 | Variable | Purpose |
 |---|---|

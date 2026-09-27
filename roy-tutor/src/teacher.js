@@ -9,8 +9,6 @@ import OpenAI from 'openai';
 // OpenAI model) decides what Roy meant, whether it shows understanding, and
 // what to say next, and returns that as structured lesson state plus speech.
 
-const MODEL = process.env.OPENAI_MODEL || 'gpt-5.5';
-const REASONING_EFFORT = process.env.OPENAI_REASONING_EFFORT || 'low';
 
 export class TeacherNotConfigured extends Error {
   constructor() {
@@ -103,6 +101,9 @@ SPEAKING STYLE
 - Always end with one clear question or instruction for Roy that matches the listening language in the lesson state (Mandarin or English), unless the session is ending.`;
 
 export function createTeacher({ client, log = console } = {}) {
+  // Read when the teacher is created, after .env has been loaded.
+  const MODEL = process.env.OPENAI_MODEL || 'gpt-5.5';
+  const REASONING_EFFORT = process.env.OPENAI_REASONING_EFFORT || 'low';
   const apiKey = process.env.OPENAI_API_KEY;
   if (!client && !apiKey) {
     return { configured: false, provider: 'openai', model: MODEL, async decide() { throw new TeacherNotConfigured(); } };

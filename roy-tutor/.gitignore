@@ -3,3 +3,5 @@ node_modules/
 *.db-journal
 .env
 __pycache__/
+.env.*
+!.env.example
