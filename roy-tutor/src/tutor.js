@@ -1,10 +1,22 @@
 import * as store from './db.js';
-import { saidMandarin, saidEnglish, hintFor, normZh } from './match.js';
+import { saidMandarin, hintFor, normZh } from './match.js';
 import { detectIntent, findEntry, ROLES } from './intents.js';
+import { checkPronunciation, checkMeaningLocally, syllablesFor } from './pronunciation.js';
 
 const REVIEW_LIMIT = 10;
 const WEAK_LIMIT = 5;
 const CONVERSATION_TURNS = 2;
+const MAX_AI_TURNS = 4;
+
+// How the next spoken answer is evaluated.
+const PRONUNCIATION = 'pronunciation'; // say the Mandarin term: checked against the expected characters
+const ANSWER = 'answer'; // answer or converse: checked for meaning, wording is free
+
+// The recogniser's guess that contains the term, if any, else its top guess.
+function bestCandidate(heard, entry) {
+  const all = [heard.text, ...(heard.alternatives ?? [])].filter(Boolean);
+  return all.find((c) => saidMandarin(c, entry)) ?? heard.text;
+}
 
 // Collects what the tutor says. Each segment is spoken in its own language;
 // `show` is the on-screen text when it differs from what is spoken.
@@ -12,13 +24,14 @@ class Reply {
   constructor() {
     this.say = [];
     this.listen = null;
+    this.mode = null;
     this.promptStart = null;
   }
   en(text) { this.say.push({ lang: 'en', text }); return this; }
   zh(text, opts = {}) { this.say.push({ lang: 'zh', text, ...opts }); return this; }
   // Everything said after this call is the question that "repeat" will replay.
   prompt() { this.promptStart = this.say.length; return this; }
-  ask(lang) { this.listen = lang; return this; }
+  ask(lang, mode = ANSWER) { this.listen = lang; this.mode = lang ? mode : null; return this; }
 }
 
 function localDate(date) {
@@ -115,7 +128,9 @@ export class Tutor {
     return this.#finish(course, session, reply);
   }
 
-  async message(text) {
+  // `meta` describes where the text came from:
+  // { source: 'voice'|'text', alternatives: string[], confidence: number }
+  async message(text, meta = {}) {
     const course = store.activeCourse(this.db);
     if (!course) return this.start();
     const progress = store.getProgress(this.db, this.userId, course.id);
@@ -125,6 +140,12 @@ export class Tutor {
     const reply = new Reply();
     const intent = detectIntent(text);
     const s = session.state;
+    intent.heard = {
+      text: String(text ?? '').trim(),
+      alternatives: (meta.alternatives ?? []).map(String).filter((a) => a.trim()).slice(0, 5),
+      confidence: typeof meta.confidence === 'number' ? meta.confidence : null,
+      source: meta.source === 'voice' ? 'voice' : 'text',
+    };
 
     switch (intent.type) {
       case 'empty':
@@ -159,7 +180,7 @@ export class Tutor {
         else this.#repeatPrompt(reply, session);
         break;
       default:
-        if (s.stage === 'review') this.#handleReview(reply, course, session, progress, intent);
+        if (s.stage === 'review') await this.#handleReview(reply, course, session, progress, intent);
         else if (s.lesson) await this.#handleLesson(reply, course, session, progress, intent);
         else if (s.stage === 'done') reply.en(`You have finished ${course.title}. Say "jump to" and a word to practise it again.`);
         else this.#resumeCurriculum(reply, course, session, progress);
@@ -208,10 +229,10 @@ export class Tutor {
 
   #finish(course, session, reply) {
     if (reply.promptStart !== null) {
-      session.state.lastPrompt = { say: reply.say.slice(reply.promptStart), listen: reply.listen };
+      session.state.lastPrompt = { say: reply.say.slice(reply.promptStart), listen: reply.listen, mode: reply.mode };
     }
     store.saveSession(this.db, session);
-    return { say: reply.say, listen: reply.listen, ...this.#view(course, session), status: this.status() };
+    return { say: reply.say, listen: reply.listen, mode: reply.mode, ...this.#view(course, session), status: this.status() };
   }
 
   #view(course, session) {
@@ -250,7 +271,7 @@ export class Tutor {
     if (!last) return;
     reply.prompt();
     reply.say.push(...last.say);
-    reply.ask(last.listen);
+    reply.ask(last.listen, last.mode ?? ANSWER);
   }
 
   #explain(reply, entry) {
@@ -281,17 +302,29 @@ export class Tutor {
       this.#resumeCurriculum(reply, course, session, store.getProgress(this.db, this.userId, course.id));
       return;
     }
-    Object.assign(r, { current: id, step: 'ask', misses: 0, forgot: 0 });
+    Object.assign(r, { current: id, step: 'ask', misses: 0, forgot: 0, repeats: 0 });
     const entry = store.entryById(this.db, id);
-    reply.prompt().en(`How do you say "${entry.english}" in Mandarin?`).ask('zh-CN');
+    reply.prompt().en(`How do you say "${entry.english}" in Mandarin?`).ask('zh-CN', PRONUNCIATION);
   }
 
-  #handleReview(reply, course, session, progress, intent) {
+  async #handleReview(reply, course, session, progress, intent) {
     const r = session.state.review;
     const entry = store.entryById(this.db, r.current);
     if (r.step === 'repeat') {
-      if (intent.type === 'answer' && saidMandarin(intent.text, entry)) reply.en('Good.');
-      else reply.en('Listen once more.').zh(entry.mandarin, { rate: 0.7 }).en("We'll practise it again soon.");
+      if (intent.type === 'forgot' || intent.type === 'dontUnderstand') {
+        reply.en('Listen.').zh(entry.mandarin, { rate: 0.6, show: `${entry.mandarin} — ${entry.pinyin}` });
+        reply.prompt().en('Say it after me.').ask('zh-CN', PRONUNCIATION);
+        return;
+      }
+      const check = checkPronunciation(entry, intent.heard);
+      await this.#pronunciationFeedback(reply, session, entry, check, intent.heard);
+      r.repeats = (r.repeats ?? 0) + 1;
+      if (!check.passed && r.repeats < 3) {
+        this.#modelPronunciation(reply, entry, r.repeats + 1);
+        reply.prompt().en('Say it after me.').zh(entry.mandarin, { rate: 0.7 }).ask('zh-CN', PRONUNCIATION);
+        return;
+      }
+      if (!check.passed) reply.en("We'll come back to this one.");
       this.#nextReview(reply, course, session, progress);
       return;
     }
@@ -300,13 +333,14 @@ export class Tutor {
       if (r.forgot === 1) {
         const { firstChar, firstSyllable } = hintFor(entry);
         reply.en('Here is a hint. It starts with').zh(firstChar, firstSyllable ? { show: `${firstChar} (${firstSyllable})` } : {});
-        reply.prompt().en(`Try again: "${entry.english}" in Mandarin?`).ask('zh-CN');
+        reply.prompt().en(`Try again: "${entry.english}" in Mandarin?`).ask('zh-CN', PRONUNCIATION);
         return;
       }
       this.#reviewMiss(reply, session, entry, true);
       return;
     }
-    if (saidMandarin(intent.text, entry)) {
+    const check = checkPronunciation(entry, intent.heard);
+    if (check.passed) {
       const ep = store.getEntryProgress(this.db, this.userId, entry.id);
       const firstTry = r.misses === 0 && r.forgot === 0;
       const confidence = Math.min(5, ep.confidence + (firstTry ? 1 : 0));
@@ -317,15 +351,17 @@ export class Tutor {
         weak: firstTry && confidence >= 3 ? 0 : ep.weak,
       });
       if (!session.words_reviewed.includes(entry.id)) session.words_reviewed.push(entry.id);
-      reply.en('Correct!').zh(entry.mandarin, { show: `${entry.mandarin} — ${entry.pinyin}` });
+      await this.#pronunciationFeedback(reply, session, entry, check, intent.heard);
+      reply.zh(entry.mandarin, { show: `${entry.mandarin} — ${entry.pinyin}` });
       this.#nextReview(reply, course, session, progress);
       return;
     }
     r.misses += 1;
+    await this.#pronunciationFeedback(reply, session, entry, check, intent.heard);
     if (r.misses === 1) {
       const { firstChar, firstSyllable } = hintFor(entry);
       reply.en('Not quite. It starts with').zh(firstChar, firstSyllable ? { show: `${firstChar} (${firstSyllable})` } : {});
-      reply.prompt().en(`Try again: "${entry.english}" in Mandarin?`).ask('zh-CN');
+      reply.prompt().en(`Try again: "${entry.english}" in Mandarin?`).ask('zh-CN', PRONUNCIATION);
       return;
     }
     this.#reviewMiss(reply, session, entry, false);
@@ -337,8 +373,8 @@ export class Tutor {
     if (!r.requeued.includes(entry.id)) { r.requeued.push(entry.id); r.queue.push(entry.id); }
     reply.en(forgot ? `The answer is:` : `The correct answer for "${entry.english}" is:`);
     reply.zh(entry.mandarin, { show: `${entry.mandarin} — ${entry.pinyin}` });
-    r.step = 'repeat';
-    reply.prompt().en('Say it after me.').zh(entry.mandarin, { rate: 0.7 }).ask('zh-CN');
+    Object.assign(r, { step: 'repeat', repeats: 0 });
+    reply.prompt().en('Say it after me.').zh(entry.mandarin, { rate: 0.7 }).ask('zh-CN', PRONUNCIATION);
   }
 
   #markWeak(session, entry) {
@@ -370,67 +406,149 @@ export class Tutor {
     reply.en('Pinyin:').zh(entry.mandarin, { rate: 0.6, show: entry.pinyin });
     if (entry.meaning) reply.en(`Meaning, from JH Medics: ${entry.meaning}`);
     else reply.en('The JH Medics meaning for this entry has not been loaded yet.');
-    reply.prompt().en('Now you say it.').zh(entry.mandarin, { rate: 0.7 }).ask('zh-CN');
+    this.#askPronounce(reply, entry);
   }
 
   async #handleLesson(reply, course, session, progress, intent) {
     const l = session.state.lesson;
     const entry = store.entryById(this.db, l.entryId);
     switch (l.step) {
-      case 'pronounce': return this.#stepPronounce(reply, l, entry, intent);
-      case 'recognize': return this.#stepRecognize(reply, l, entry, intent);
+      case 'pronounce': return this.#stepPronounce(reply, session, l, entry, intent);
+      case 'recognize': return this.#stepRecognize(reply, course, l, entry, intent);
       case 'sentence': return this.#stepSentence(reply, course, session, l, entry, intent);
       case 'conversation': return this.#stepConversation(reply, course, session, l, entry, intent);
     }
   }
 
-  #stepPronounce(reply, l, entry, intent) {
-    if (intent.type === 'answer' && saidMandarin(intent.text, entry)) {
-      reply.en('Good, I heard it clearly.');
-      return this.#askRecognize(reply, l, entry);
-    }
-    l.attempts += 1;
-    if (intent.type === 'answer') l.mistakes += 1;
-    if (l.attempts < 3) {
-      if (intent.type === 'answer') reply.en(`I heard "${intent.text}". Listen again.`);
-      else reply.en('Listen carefully.');
-      reply.zh(entry.mandarin, { rate: 0.6, show: `${entry.mandarin} — ${entry.pinyin}` });
-      reply.prompt().en('Your turn.').zh(entry.mandarin, { rate: 0.7 }).ask('zh-CN');
-      return;
-    }
-    reply.en("Let's move on. We'll keep practising it.");
-    this.#askRecognize(reply, l, entry);
+  // MODE 1: pronunciation. Repeats until the recogniser hears the term.
+  #askPronounce(reply, entry) {
+    reply.prompt().en('Now you say it.').zh(entry.mandarin, { rate: 0.7 }).ask('zh-CN', PRONUNCIATION);
   }
 
+  async #stepPronounce(reply, session, l, entry, intent) {
+    if (intent.type === 'forgot') {
+      reply.en('Listen carefully.').zh(entry.mandarin, { rate: 0.6, show: `${entry.mandarin} — ${entry.pinyin}` });
+      reply.prompt().en('Your turn.').ask('zh-CN', PRONUNCIATION);
+      return;
+    }
+    const check = checkPronunciation(entry, intent.heard);
+    await this.#pronunciationFeedback(reply, session, entry, check, intent.heard);
+    if (check.passed) return this.#askRecognize(reply, l, entry);
+    l.attempts += 1;
+    if (l.attempts <= 2) l.mistakes += 1;
+    this.#modelPronunciation(reply, entry, l.attempts);
+    reply.prompt().en('Try again. Say').zh(entry.mandarin, { rate: 0.7 }).ask('zh-CN', PRONUNCIATION);
+  }
+
+  // Slows down as Roy keeps trying: whole word, then syllable by syllable.
+  #modelPronunciation(reply, entry, attempts) {
+    if (attempts < 3) {
+      reply.en('Listen again.').zh(entry.mandarin, { rate: 0.6, show: `${entry.mandarin} — ${entry.pinyin}` });
+      return;
+    }
+    reply.en("Let's take it one syllable at a time.");
+    const syllables = syllablesFor(entry);
+    [...normZh(entry.mandarin)].forEach((char, i) => {
+      reply.zh(char, { rate: 0.5, show: syllables[i] ? `${char} ${syllables[i]}` : char });
+    });
+    reply.en('Now the whole term:').zh(entry.mandarin, { rate: 0.6, show: `${entry.mandarin} — ${entry.pinyin}` });
+  }
+
+  async #pronunciationFeedback(reply, session, entry, check, heard) {
+    if (check.typed) {
+      if (check.passed) reply.en("That's the right word. Say it out loud when you can, so I can check your pronunciation.");
+      else reply.en(`You typed "${check.heard}". The term is`).zh(entry.mandarin, { show: `${entry.mandarin} — ${entry.pinyin}` });
+      return;
+    }
+    if (check.verdict === 'correct') {
+      reply.en(check.lowConfidence ? 'Correct, but the speech recogniser was not very sure. Say it a little more clearly next time.' : 'Correct! I heard').zh(entry.mandarin);
+      return;
+    }
+    if (!session.state.pronNoteGiven) {
+      session.state.pronNoteGiven = true;
+      reply.en("A note on how I check: I go by what the speech recogniser writes down. I can tell which syllables it heard, but I can't measure your tones directly.");
+    }
+    if (check.verdict === 'close') {
+      const viaPinyin = check.via && !/\p{Script=Han}/u.test(check.via);
+      reply.en(viaPinyin
+        ? `Good. I heard the right syllables, "${check.via}", but I can't check the tones from that.`
+        : `Close. The recogniser first wrote "${check.heard}", but it also heard the right term. Say it a little more clearly.`);
+      return;
+    }
+    reply.en(check.heard ? `I heard "${check.heard}".` : "I didn't hear any Mandarin.");
+    let explained = false;
+    if (this.ai.enabled && check.heard) {
+      try {
+        const result = await this.ai.explainPronunciation({ entry, check, alternatives: heard.alternatives ?? [] });
+        for (const line of result.feedback) reply.say.push({ lang: line.lang, text: line.text });
+        explained = true;
+      } catch (err) {
+        console.error('pronunciation feedback failed, using the basic feedback:', err.message);
+      }
+    }
+    if (explained) return;
+    if (check.verdict === 'partial') {
+      reply.en('Some of it was right. The part to work on:');
+      for (const m of check.missing) reply.zh(m.char, { show: m.syllable ? `${m.char} (${m.syllable})` : m.char });
+    } else {
+      reply.en("That didn't sound like the term yet.");
+    }
+  }
+
+  // MODE 2: does Roy know what the term means? Any natural answer that shows
+  // the meaning is accepted.
   #askRecognize(reply, l, entry) {
     Object.assign(l, { step: 'recognize', attempts: 0, forgot: 0 });
-    reply.prompt().en('Listen.').zh(entry.mandarin).en('What is that in English?').ask('en-US');
+    reply.prompt().en('What does').zh(entry.mandarin).en('mean? Answer in English, in your own words.').ask('en-US', ANSWER);
   }
 
-  #stepRecognize(reply, l, entry, intent) {
-    if (intent.type === 'answer' && saidEnglish(intent.text, entry)) {
-      reply.en(`Correct. It's "${entry.english}".`);
-      return this.#askSentence(reply, l, entry);
-    }
-    if (intent.type === 'forgot' && l.forgot === 0) {
+  async #stepRecognize(reply, course, l, entry, intent) {
+    if (intent.type === 'forgot') {
       l.forgot += 1;
-      reply.en(`Hint: the English starts with "${entry.english.slice(0, 2)}".`);
-      reply.prompt().zh(entry.mandarin).en('What is that in English?').ask('en-US');
+      if (l.forgot === 1) {
+        reply.en(`Hint: the English starts with "${entry.english.slice(0, 2)}".`);
+        reply.prompt().en('What does').zh(entry.mandarin).en('mean?').ask('en-US', ANSWER);
+        return;
+      }
+      this.#revealMeaning(reply, entry);
       return;
     }
+    const answer = intent.heard.text;
+    let result = null;
+    if (this.ai.enabled) {
+      try {
+        result = await this.ai.checkMeaning({ entry, known: this.#known(course), answer });
+        for (const line of result.feedback) reply.say.push({ lang: line.lang, text: line.text });
+      } catch (err) {
+        console.error('meaning check failed, using the basic check:', err.message);
+        result = null;
+      }
+    }
+    if (!result) {
+      const local = checkMeaningLocally(entry, answer);
+      result = { correct: local.correct };
+      if (local.correct) reply.en(`Correct. It means "${entry.english}".`);
+      else reply.en(`You said "${answer}". That isn't what`).zh(entry.mandarin).en('means.');
+    }
+    if (result.correct) return this.#askSentence(reply, l, entry);
     l.attempts += 1;
-    l.mistakes += 1;
-    if (l.attempts < 2 && intent.type !== 'forgot') {
-      reply.en('Not quite.').prompt().en('Try again. What is').zh(entry.mandarin).en('in English?').ask('en-US');
+    if (l.attempts <= 2) l.mistakes += 1;
+    if (l.attempts === 1) {
+      reply.prompt().en('Try again. What does').zh(entry.mandarin).en('mean?').ask('en-US', ANSWER);
       return;
     }
+    this.#revealMeaning(reply, entry);
+  }
+
+  #revealMeaning(reply, entry) {
     reply.zh(entry.mandarin).en(`means "${entry.english}".`);
-    this.#askSentence(reply, l, entry);
+    if (entry.meaning) reply.en(`From JH Medics: ${entry.meaning}`);
+    reply.prompt().en('Now tell me in your own words: what does').zh(entry.mandarin).en('mean?').ask('en-US', ANSWER);
   }
 
   #askSentence(reply, l, entry) {
     Object.assign(l, { step: 'sentence', attempts: 0, forgot: 0 });
-    reply.prompt().en('Now make a short sentence in Mandarin using').zh(entry.mandarin).ask('zh-CN');
+    reply.prompt().en('Now make a short sentence in Mandarin using').zh(entry.mandarin).ask('zh-CN', ANSWER);
   }
 
   #exampleSentence(reply, entry) {
@@ -440,14 +558,15 @@ export class Tutor {
   async #stepSentence(reply, course, session, l, entry, intent) {
     if (intent.type === 'forgot' || intent.type === 'dontUnderstand') {
       this.#exampleSentence(reply, entry);
-      reply.prompt().en('Now try your own sentence with').zh(entry.mandarin).ask('zh-CN');
+      reply.prompt().en('Now try your own sentence with').zh(entry.mandarin).ask('zh-CN', ANSWER);
       return;
     }
+    const sentence = bestCandidate(intent.heard, entry);
     l.attempts += 1;
     let ok = null;
     if (this.ai.enabled) {
       try {
-        const result = await this.ai.checkSentence({ entry, known: this.#known(course), sentence: intent.text });
+        const result = await this.ai.checkSentence({ entry, known: this.#known(course), sentence });
         for (const line of result.feedback) reply.say.push({ lang: line.lang, text: line.text });
         if (!result.correct && result.corrected_sentence) reply.en('A correct version:').zh(result.corrected_sentence);
         ok = result.correct;
@@ -456,19 +575,17 @@ export class Tutor {
       }
     }
     if (ok === null) {
-      const used = saidMandarin(intent.text, entry);
-      const longer = normZh(intent.text).length > normZh(entry.mandarin).length;
+      const used = saidMandarin(sentence, entry);
+      const longer = normZh(sentence).length > normZh(entry.mandarin).length;
       ok = used && longer;
       if (ok) reply.en('Good, you used').zh(entry.mandarin).en('in a sentence.');
-      else if (used) { reply.en('You said the word. Now put it in a full sentence.'); this.#exampleSentence(reply, entry); }
-      else { reply.en('Your sentence needs to include').zh(entry.mandarin); }
+      else if (used) reply.en('You said the word. Now put it in a full sentence.');
+      else reply.en(`I heard "${sentence}". Your sentence needs to include`).zh(entry.mandarin);
     }
-    if (!ok) l.mistakes += 1;
-    if (!ok && l.attempts < 2) {
-      reply.prompt().en('Try once more.').ask('zh-CN');
-      return;
-    }
-    await this.#startConversation(reply, course, session);
+    if (ok) return this.#startConversation(reply, course, session);
+    if (l.attempts <= 2) l.mistakes += 1;
+    if (l.attempts >= 2) this.#exampleSentence(reply, entry);
+    reply.prompt().en('Try once more.').ask('zh-CN', ANSWER);
   }
 
   #known(course) {
@@ -496,7 +613,7 @@ export class Tutor {
     const l = session.state.lesson;
     const entry = store.entryById(this.db, l.entryId);
     l.step = 'conversation';
-    l.conv = { history: [], turns: 0, scripted: !this.ai.enabled };
+    l.conv = { history: [], turns: 0, used: 0, scripted: !this.ai.enabled };
     reply.en(`Role-play time. You are the ${session.state.roySide.toLowerCase()}.`);
     if (this.ai.enabled) {
       try {
@@ -507,7 +624,7 @@ export class Tutor {
         l.conv.history = result.history;
         reply.prompt();
         for (const line of result.lines) reply.say.push({ lang: line.lang, text: line.text });
-        reply.ask('zh-CN');
+        reply.ask('zh-CN', ANSWER);
         return;
       } catch (err) {
         console.error('role-play failed, using the scripted scene:', err.message);
@@ -547,9 +664,10 @@ export class Tutor {
   #scriptedTurn(reply, session, entry) {
     const l = session.state.lesson;
     const line = this.#scriptLines(session.state.roySide, entry)[l.conv.turns];
-    reply.prompt().en(line).ask('zh-CN');
+    reply.prompt().en(line).ask('zh-CN', ANSWER);
   }
 
+  // Each reply must use the term; the scene only moves on when it does.
   async #stepConversation(reply, course, session, l, entry, intent) {
     if (intent.type === 'forgot') {
       const { firstChar, firstSyllable } = hintFor(entry);
@@ -557,33 +675,51 @@ export class Tutor {
       this.#repeatPrompt(reply, session);
       return;
     }
-    const used = saidMandarin(intent.text, entry);
-    l.conv.turns += 1;
+    const royText = bestCandidate(intent.heard, entry);
+    const used = saidMandarin(royText, entry);
     if (!l.conv.scripted) {
       try {
         const result = await this.ai.rolePlay({
           entry, known: this.#known(course), role: 'the other people in the scene',
-          roySide: session.state.roySide, history: l.conv.history, royText: intent.text,
+          roySide: session.state.roySide, history: l.conv.history, royText,
         });
         l.conv.history = result.history;
-        if (!(result.roy_used_term || used)) l.mistakes += 1;
-        const done = result.finished || l.conv.turns >= CONVERSATION_TURNS + 1;
-        if (done) {
+        l.conv.turns += 1;
+        if (result.roy_used_term || used) l.conv.used += 1;
+        else if (l.conv.turns <= 2) l.mistakes += 1;
+        const finished = result.finished || l.conv.turns >= MAX_AI_TURNS;
+        if (finished && l.conv.used > 0) {
           for (const line of result.lines) reply.say.push({ lang: line.lang, text: line.text });
           this.#completeEntry(reply, course, session);
-        } else {
-          reply.prompt();
-          for (const line of result.lines) reply.say.push({ lang: line.lang, text: line.text });
-          reply.ask('zh-CN');
+          return;
         }
+        if (finished) {
+          // The scene ended without Roy using the term: one scripted line that needs it.
+          for (const line of result.lines) reply.say.push({ lang: line.lang, text: line.text });
+          reply.en('Before we finish, you need to use the term in the scene.');
+          Object.assign(l.conv, { scripted: true, turns: CONVERSATION_TURNS - 1 });
+          this.#scriptedTurn(reply, session, entry);
+          return;
+        }
+        reply.prompt();
+        for (const line of result.lines) reply.say.push({ lang: line.lang, text: line.text });
+        reply.ask('zh-CN', ANSWER);
         return;
       } catch (err) {
         console.error('role-play failed, using the scripted scene:', err.message);
         l.conv.scripted = true;
       }
     }
-    if (used) reply.en('Good, you used').zh(entry.mandarin);
-    else { l.mistakes += 1; reply.en('Remember to use the term:').zh(entry.mandarin, { show: `${entry.mandarin} — ${entry.pinyin}` }); }
+    if (!used) {
+      l.mistakes += 1;
+      reply.en(royText ? `I heard "${royText}". Remember to use the term:` : 'Remember to use the term:');
+      reply.zh(entry.mandarin, { show: `${entry.mandarin} — ${entry.pinyin}` });
+      reply.en('Try that line again.');
+      this.#scriptedTurn(reply, session, entry);
+      return;
+    }
+    reply.en('Good, you used').zh(entry.mandarin);
+    l.conv.turns += 1;
     if (l.conv.turns < CONVERSATION_TURNS) this.#scriptedTurn(reply, session, entry);
     else this.#completeEntry(reply, course, session);
   }

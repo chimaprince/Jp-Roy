@@ -31,6 +31,39 @@ in (Mandarin or English).
 
 The API key is only read by the server (`src/ai.js`). The browser never sees it.
 
+## Answering by voice
+
+Tap **🎙 START TALKING**. The tutor speaks, the microphone opens, Roy answers,
+and the tutor replies. It then listens again, without Roy tapping anything. The badge under the button
+shows the state: IDLE → TEACHER RESPONSE → LISTENING → PROCESSING →
+TEACHER RESPONSE → LISTENING AGAIN. Tapping the button while the tutor is
+speaking skips to answering, and tapping it while listening pauses.
+
+The browser's speech recogniser turns speech into text (with up to five
+guesses and a confidence score) and the server evaluates it in one of two modes:
+
+- **Pronunciation** (saying the Mandarin term, and review questions). The tutor
+  checks whether the recogniser heard the expected characters, first in its top
+  guess and then in its other guesses, and names the syllables it did not hear.
+  With `ANTHROPIC_API_KEY` set, Claude looks at the characters the recogniser
+  wrote instead (for example 应 for 硬) and says which tone or sound probably
+  slipped.
+  **Limit:** this is a check of what the recogniser heard, not an acoustic
+  tone score. The browser does not give the server any audio, so tones can
+  only be inferred. The tutor tells Roy this the first time it corrects him.
+- **Answer / conversation** (meaning, sentence, role-play). With Claude on,
+  any natural answer that shows the meaning is accepted. Without it, the
+  built-in check accepts the English term or most of the key words of the JH
+  Medics meaning, so while an entry's meaning is missing only the English term
+  itself is accepted.
+
+Each exercise repeats, with more help each time, until Roy gets it right. A word is
+only marked complete after all four exercises are passed. "Jump to" and "Stop"
+still work at any time.
+
+Typing (the "type instead" box) works as a fallback. Typed Mandarin is
+checked for the right word, but it can't check pronunciation.
+
 ## What Roy can say
 
 | Roy says | Tutor does |

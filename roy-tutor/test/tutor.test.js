@@ -91,7 +91,7 @@ test('a new day reviews yesterday before any new word', async () => {
 
   await tutor.message('硬膜外'); // repeat after me; the weak word comes round again
   const again = await tutor.message('硬膜外');
-  assert.match(spoken(again), /Correct/);
+  assert.match(spoken(again), /right word/);
   assert.match(spoken(again), /Review complete/);
   assert.match(spoken(again), /Word 2 of 3/);
   assert.equal(getProgress(db, 'roy', course.id).review_required, 0);
@@ -174,6 +174,7 @@ test('AI sentence check and role-play are used when available', async () => {
   const calls = [];
   const ai = {
     enabled: true,
+    async checkMeaning(args) { calls.push(['meaning', args.answer]); return { correct: true, feedback: [{ lang: 'en', text: 'Yes, that is it.' }] }; },
     async checkSentence(args) { calls.push(['sentence', args.sentence]); return { correct: true, feedback: [{ lang: 'en', text: 'Well said.' }], corrected_sentence: null }; },
     async rolePlay(args) {
       calls.push(['role', args.royText]);
@@ -184,14 +185,15 @@ test('AI sentence check and role-play are used when available', async () => {
   const tutor = new Tutor({ db, ai, now: () => new Date('2026-09-27T10:00:00') });
   await tutor.start();
   await tutor.message('硬膜外');
-  await tutor.message('epidural');
+  const meaning = await tutor.message("it's the injection near the spine for pain relief");
+  assert.match(spoken(meaning), /Yes, that is it/);
   const conv = await tutor.message('医生说硬膜外');
   assert.match(spoken(conv), /Well said/);
   assert.match(spoken(conv), /Doctor line 0/);
   await tutor.message('硬膜外');
   const done = await tutor.message('硬膜外');
   assert.match(spoken(done), /Word 1 complete/);
-  assert.deepEqual(calls.map((c) => c[0]), ['sentence', 'role', 'role', 'role']);
+  assert.deepEqual(calls.map((c) => c[0]), ['meaning', 'sentence', 'role', 'role', 'role']);
 });
 
 test('end of session stores a summary', async () => {
@@ -269,4 +271,105 @@ test('answer matching accepts characters or pinyin', () => {
   assert.ok(!saidMandarin('硬膜', e));
   assert.ok(saidEnglish('It means epidural', e));
   assert.ok(!saidEnglish('spinal', e));
+});
+
+// ---------- voice evaluation ----------
+
+const voice = (_said, alternatives = [], confidence = 0.9) => ({ source: 'voice', alternatives, confidence });
+
+test('pronunciation: the recogniser hearing the term passes', async () => {
+  const { tutor } = setup();
+  const r0 = await tutor.start();
+  assert.equal(r0.mode, 'pronunciation');
+  const r = await tutor.message('硬膜外', voice('硬膜外'));
+  assert.match(spoken(r), /Correct! I heard/);
+  assert.equal(r.mode, 'answer');
+  assert.equal(r.listen, 'en-US');
+});
+
+test('pronunciation: a near miss names the syllable to fix and repeats until right', async () => {
+  const { db, tutor } = setup();
+  await tutor.start();
+  const r = await tutor.message('应膜外', voice('应膜外', ['英模外']));
+  const text = spoken(r);
+  assert.match(text, /I heard "应膜外"/);
+  assert.match(text, /can't measure your tones directly/, 'says honestly what it can check');
+  assert.ok(r.say.some((s) => s.text === '硬' && s.show === '硬 (yìng)'), 'points at the missing syllable');
+  assert.equal(r.mode, 'pronunciation', 'asks again');
+
+  await tutor.message('不对', voice('不对'));
+  const third = await tutor.message('不对', voice('不对'));
+  assert.match(spoken(third), /one syllable at a time/);
+  assert.equal(third.mode, 'pronunciation', 'still on pronunciation, never skipped');
+  const course = activeCourse(db);
+  assert.equal(getEntryProgress(db, 'roy', entryAt(db, course.id, 1).id).completed, 0);
+
+  const ok = await tutor.message('硬膜外', voice('硬膜外'));
+  assert.match(spoken(ok), /Correct/);
+  assert.equal(ok.mode, 'answer');
+});
+
+test('pronunciation: the term found only in the recogniser\'s other guesses counts as close', async () => {
+  const { tutor } = setup();
+  await tutor.start();
+  const r = await tutor.message('硬摸外', voice('硬摸外', ['硬膜外']));
+  assert.match(spoken(r), /Close/);
+  assert.equal(r.mode, 'answer');
+});
+
+test('pronunciation: AI explains likely tone slips from what the recogniser heard', async () => {
+  const { db } = setup();
+  const ai = {
+    enabled: true,
+    async explainPronunciation({ check }) {
+      assert.equal(check.heard, '应膜外');
+      return { feedback: [{ lang: 'en', text: 'The recogniser heard yīng, first tone. You need yìng, fourth tone.' }] };
+    },
+  };
+  const tutor = new Tutor({ db, ai, now: () => new Date('2026-09-27T10:00:00') });
+  await tutor.start();
+  const r = await tutor.message('应膜外', voice('应膜外'));
+  assert.match(spoken(r), /fourth tone/);
+});
+
+test('meaning: a natural answer is accepted without exact wording', async () => {
+  const { tutor } = setup();
+  await tutor.start();
+  await tutor.message('jump to word 2');
+  await tutor.message('测试二', voice('测试二'));
+  const r = await tutor.message('I think it is the placeholder for meaning number two', voice(''));
+  assert.match(spoken(r), /Correct/);
+  assert.match(spoken(r), /sentence/);
+});
+
+test('meaning: a wrong answer is explained and asked again until right', async () => {
+  const { tutor } = setup();
+  await tutor.start();
+  await tutor.message('硬膜外', voice('硬膜外'));
+  const wrong = await tutor.message('a broken arm', voice(''));
+  assert.match(spoken(wrong), /You said "a broken arm"/);
+  assert.equal(wrong.mode, 'answer');
+  const wrong2 = await tutor.message('no idea', voice(''));
+  assert.match(spoken(wrong2), /means "epidural"/);
+  assert.match(spoken(wrong2), /in your own words/);
+  const right = await tutor.message('epidural', voice(''));
+  assert.match(spoken(right), /sentence/);
+});
+
+test('sentence and role-play repeat until the term is used', async () => {
+  const { tutor } = setup();
+  await tutor.start();
+  await tutor.message('硬膜外', voice('硬膜外'));
+  await tutor.message('epidural', voice(''));
+  const s1 = await tutor.message('我很好', voice('我很好'));
+  assert.match(spoken(s1), /needs to include/);
+  const s2 = await tutor.message('我很好', voice('我很好'));
+  assert.match(spoken(s2), /这是硬膜外/, 'gives an example after two misses');
+  const conv = await tutor.message('医生说硬膜外', voice('医生说硬膜外'));
+  assert.equal(conv.stage, 'conversation');
+  const miss = await tutor.message('你好', voice('你好'));
+  assert.match(spoken(miss), /Try that line again/);
+  await tutor.message('硬膜外', voice('硬膜外'));
+  const done = await tutor.message('这是硬膜外', voice('这是硬膜外'));
+  assert.match(spoken(done), /Word 1 complete/);
 });

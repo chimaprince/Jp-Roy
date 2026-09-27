@@ -61,7 +61,11 @@ const serial = (fn) => (queue = queue.then(fn, fn));
 const routes = {
   'GET /api/status': () => tutor.status(),
   'POST /api/session/start': () => tutor.start(),
-  'POST /api/session/message': (body) => tutor.message(String(body.text ?? '').slice(0, 500)),
+  'POST /api/session/message': (body) => tutor.message(String(body.text ?? '').slice(0, 500), {
+    source: body.source === 'voice' ? 'voice' : 'text',
+    alternatives: Array.isArray(body.alternatives) ? body.alternatives.slice(0, 5).map((a) => String(a).slice(0, 500)) : [],
+    confidence: Number.isFinite(body.confidence) ? body.confidence : null,
+  }),
   'POST /api/session/end': () => tutor.end(),
 };
 

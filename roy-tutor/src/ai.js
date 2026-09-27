@@ -45,6 +45,25 @@ const SENTENCE_SCHEMA = {
   additionalProperties: false,
 };
 
+const MEANING_SCHEMA = {
+  type: 'object',
+  properties: {
+    correct: { type: 'boolean' },
+    feedback: { type: 'array', items: LINE },
+  },
+  required: ['correct', 'feedback'],
+  additionalProperties: false,
+};
+
+const PRONUNCIATION_SCHEMA = {
+  type: 'object',
+  properties: {
+    feedback: { type: 'array', items: LINE },
+  },
+  required: ['feedback'],
+  additionalProperties: false,
+};
+
 const ROLEPLAY_SCHEMA = {
   type: 'object',
   properties: {
@@ -85,6 +104,33 @@ export function createAi({ client } = {}) {
 Roy was asked to use the current term in a sentence. Judge his sentence (it came from speech recognition, so ignore homophone slips and missing punctuation).
 correct = true if it uses the Mandarin term sensibly. Give brief spoken feedback lines (English for explanation, zh for Mandarin). If there are mistakes, put one natural corrected sentence that uses the term in corrected_sentence, otherwise null.`;
       return ask(system, [{ role: 'user', content: `${entryBlock(entry, known)}\n\nRoy's sentence: ${sentence}` }], SENTENCE_SCHEMA);
+    },
+
+    // MODE 2: does Roy's spoken answer show he knows what the term means?
+    async checkMeaning({ entry, known, answer }) {
+      const system = `${SOURCE_RULES}
+
+Roy was asked what the Mandarin term means. His answer came from speech recognition, so ignore small recognition errors and filler words.
+correct = true if his answer shows he understands the meaning: the English term, a synonym, or a natural description that matches the source meaning. Do not require any exact wording.
+correct = false if it names a different thing or is too vague to tell.
+Give one or two short spoken feedback lines. If wrong, say briefly what he said and what the term actually means, using only the curriculum information.`;
+      return ask(system, [{ role: 'user', content: `${entryBlock(entry, known)}\n\nRoy's answer: ${answer}` }], MEANING_SCHEMA);
+    },
+
+    // MODE 1 feedback. There is no audio here: only what the speech recogniser
+    // wrote down. The model infers likely sound or tone slips from the characters
+    // the recogniser heard instead, and must say it is inferring.
+    async explainPronunciation({ entry, check, alternatives }) {
+      const system = `${SOURCE_RULES}
+
+Roy tried to say the current Mandarin term aloud. You do not have the audio, only what a speech recogniser wrote down (its top guess and other guesses).
+If the recogniser wrote different characters, compare their standard pinyin with the expected pinyin and say which syllable probably needs work and whether it looks like a tone or a sound difference (for example "it heard yīng, first tone; you need yìng, fourth tone").
+Say this is based on what the recogniser heard. Do not claim you heard his voice. Do not give a score.
+Give one to three short spoken lines, English for explanation, zh for Mandarin, ending with encouragement to try again.`;
+      const detail = `Recogniser's top guess: ${check.heard || '(nothing)'}
+Other guesses: ${alternatives.length ? alternatives.join(' | ') : '(none)'}
+Characters not heard: ${check.missing.map((m) => m.char).join(' ') || '(none)'}`;
+      return ask(system, [{ role: 'user', content: `${entryBlock(entry, [])}\n\n${detail}` }], PRONUNCIATION_SCHEMA);
     },
 
     async rolePlay({ entry, known, role, roySide, history, royText }) {

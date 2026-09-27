@@ -23,8 +23,10 @@
       </ol>
     </section>
 
-    <button id="talk" class="talk" type="button" aria-pressed="false">🎙 START TALKING</button>
+    <button id="talk" class="talk" type="button" aria-pressed="false" data-state="idle">🎙 START TALKING</button>
+    <p class="mic-state" id="mic-state" data-state="idle">IDLE</p>
     <p class="status" id="status" aria-live="polite">Press the button and the tutor will start.</p>
+    <p class="heard" id="heard" aria-live="polite" hidden></p>
 
     <section class="card" id="card" hidden aria-live="polite">
       <p class="position" id="card-position"></p>

@@ -1,18 +1,35 @@
-// Voice loop: the tutor speaks, then the microphone opens in the language the
-// tutor asked for, and whatever Roy says goes back to the server.
-// No API keys live here; all AI calls happen on the server.
+// Voice loop. The microphone button drives everything:
+//
+//   IDLE → (tap) → TEACHER RESPONSE → LISTENING → PROCESSING → TEACHER RESPONSE → LISTENING AGAIN …
+//
+// Speech is turned into text by the browser's speech recogniser. The text,
+// the recogniser's other guesses and its confidence go to the server, where
+// the tutor evaluates them. No API keys live here.
 
 const $ = (id) => document.getElementById(id);
 const talkBtn = $('talk');
+const micStateEl = $('mic-state');
 const statusEl = $('status');
+const heardEl = $('heard');
 const logEl = $('log');
 
 const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-let active = false;
-let recognizer = null;
+
+const STATES = {
+  idle: { badge: 'IDLE', button: '🎙 START TALKING' },
+  speaking: { badge: 'TEACHER RESPONSE', button: '🔊 TUTOR SPEAKING' },
+  listening: { badge: 'LISTENING', button: '🎙 LISTENING…' },
+  processing: { badge: 'PROCESSING', button: '⏳ PROCESSING…' },
+};
+
+let state = 'idle';
+let sessionOpen = false; // the tutor has asked something and is waiting for an answer
 let listenLang = null;
-let busy = false;
+let mode = null;
+let recognizer = null;
+let turnsHeard = 0;
 let silentRetries = 0;
+let speechRun = 0; // bumps to cancel a speech sequence in progress
 
 function accessHeaders() {
   let code = '';
@@ -39,9 +56,28 @@ async function api(method, url, body) {
 
 // ---------- display ----------
 
-function setStatus(text, listening = false) {
-  statusEl.textContent = text;
-  statusEl.classList.toggle('listening', listening);
+function setState(next, { again = false } = {}) {
+  state = next;
+  const s = STATES[next];
+  micStateEl.dataset.state = next;
+  micStateEl.textContent = next === 'listening' && again ? 'LISTENING AGAIN' : s.badge;
+  talkBtn.dataset.state = next;
+  talkBtn.textContent = s.button;
+  talkBtn.setAttribute('aria-pressed', String(next !== 'idle'));
+  statusEl.classList.toggle('listening', next === 'listening');
+}
+
+function setStatus(text) { statusEl.textContent = text; }
+
+function showHeard(text, final = false) {
+  heardEl.hidden = !text;
+  heardEl.textContent = text ? `${final ? 'You said' : 'Hearing'}: “${text}”` : '';
+}
+
+function listeningHint() {
+  if (mode === 'pronunciation') return 'Say the Mandarin term. Checking what the speech recogniser hears.';
+  if (listenLang?.startsWith('zh')) return 'Answer in Mandarin.';
+  return 'Answer in English, in your own words.';
 }
 
 function addLog(who, text) {
@@ -94,58 +130,116 @@ function speakSegment(seg) {
     const voice = pickVoice(seg.lang);
     if (voice) u.voice = voice;
     u.rate = seg.rate ?? (seg.lang === 'zh' ? 0.85 : 1);
-    u.onend = resolve;
-    u.onerror = resolve;
+    // Some browsers never fire onend; don't let that stall the conversation.
+    const timer = setTimeout(resolve, 2500 + seg.text.length * 180 / u.rate);
+    u.onend = u.onerror = () => { clearTimeout(timer); resolve(); };
     speechSynthesis.speak(u);
   });
 }
 
 async function speakAll(segments) {
-  const lines = [];
-  for (const seg of segments) lines.push(seg.show ?? seg.text);
-  addLog('tutor', lines.join(' '));
-  setStatus('Tutor is speaking…');
+  addLog('tutor', segments.map((seg) => seg.show ?? seg.text).join(' '));
+  const run = ++speechRun;
+  setState('speaking');
+  setStatus('Tap the button to skip ahead and answer.');
   for (const seg of segments) {
-    if (!active) break;
+    if (run !== speechRun) return false;
     await speakSegment(seg);
   }
+  return run === speechRun;
+}
+
+function stopSpeaking() {
+  speechRun += 1;
+  if ('speechSynthesis' in window) speechSynthesis.cancel();
 }
 
 // ---------- speech in ----------
 
+function openTypeFallback(message) {
+  document.querySelector('.type-instead').open = true;
+  setState('idle');
+  setStatus(message);
+}
+
 function listen() {
-  if (!active || !listenLang) { setStatus(active ? 'Say something, or use a button below.' : 'Paused.'); return; }
-  if (!Recognition) { setStatus('This browser cannot hear you. Use Chrome or Edge, or type below.'); return; }
+  if (!sessionOpen || !listenLang) { setState('idle'); setStatus('Tap START TALKING to continue.'); return; }
+  if (!Recognition) {
+    openTypeFallback('This browser has no speech recognition. Type your answer below, or use Chrome or Edge.');
+    return;
+  }
+  const again = turnsHeard > 0;
   recognizer = new Recognition();
   recognizer.lang = listenLang;
-  recognizer.interimResults = false;
-  recognizer.maxAlternatives = 1;
-  let heard = false;
+  recognizer.continuous = false;
+  recognizer.interimResults = true;
+  recognizer.maxAlternatives = 5;
+  let finalText = '';
+  let alternatives = [];
+  let confidence = null;
+  let failed = false;
+
   recognizer.onresult = (e) => {
-    heard = true;
-    silentRetries = 0;
-    send(e.results[0][0].transcript);
+    let interim = '';
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const result = e.results[i];
+      if (result.isFinal) {
+        finalText += result[0].transcript;
+        confidence = result[0].confidence;
+        alternatives = Array.from(result).slice(1).map((a) => a.transcript);
+      } else {
+        interim += result[0].transcript;
+      }
+    }
+    showHeard((finalText + interim).trim());
   };
   recognizer.onerror = (e) => {
+    failed = true;
     if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
-      stopTalking();
-      setStatus('Microphone blocked. Allow microphone access, then press the button again.');
+      openTypeFallback('Microphone access is blocked. Allow the microphone for this site and tap START TALKING, or type below.');
+    } else if (e.error === 'audio-capture') {
+      openTypeFallback('No microphone was found. Connect one and tap START TALKING, or type below.');
+    } else if (e.error === 'network') {
+      openTypeFallback("The browser's speech service can't be reached. Type your answer below for now.");
+    } else if (e.error === 'no-speech') {
+      failed = false; // handled in onend as a silent turn
     }
   };
   recognizer.onend = () => {
     recognizer = null;
-    if (!heard && active && !busy) {
-      silentRetries += 1;
-      if (silentRetries <= 3) listen();
-      else setStatus('Still here. Press the button when you are ready.');
+    if (failed || state !== 'listening') return;
+    const text = finalText.trim();
+    if (text) {
+      silentRetries = 0;
+      turnsHeard += 1;
+      showHeard(text, true);
+      send(text, { source: 'voice', alternatives, confidence });
+      return;
     }
+    silentRetries += 1;
+    if (silentRetries <= 2) { listen(); return; }
+    setState('idle');
+    setStatus("I didn't hear anything. Tap START TALKING when you're ready.");
   };
-  setStatus(listenLang.startsWith('zh') ? '🎙 Listening (Mandarin)…' : '🎙 Listening (English)…', true);
-  recognizer.start();
+
+  setState('listening', { again });
+  setStatus(`${listeningHint()} Tap the button to pause.`);
+  showHeard('');
+  try {
+    recognizer.start();
+  } catch {
+    recognizer = null;
+    setState('idle');
+    setStatus('The microphone is busy. Tap START TALKING to try again.');
+  }
 }
 
 function stopListening() {
-  if (recognizer) { recognizer.onend = null; recognizer.abort(); recognizer = null; }
+  if (!recognizer) return;
+  recognizer.onend = null;
+  recognizer.onresult = null;
+  recognizer.abort();
+  recognizer = null;
 }
 
 // ---------- flow ----------
@@ -154,54 +248,63 @@ async function handle(result) {
   if (result.status) renderStatus(result.status);
   renderView(result);
   listenLang = result.listen;
-  await speakAll(result.say || []);
-  if (result.ended) { stopTalking(); setStatus('Session saved. See you next time.'); return; }
-  listen();
+  mode = result.mode;
+  sessionOpen = !result.ended;
+  const finished = await speakAll(result.say || []);
+  if (result.ended) {
+    setState('idle');
+    setStatus('Session saved. See you next time.');
+    return;
+  }
+  if (finished) listen();
 }
 
-async function send(text) {
-  if (busy) return;
-  busy = true;
+async function send(text, meta = { source: 'text' }) {
+  if (state === 'processing') return;
   stopListening();
-  speechSynthesis.cancel();
+  stopSpeaking();
   addLog('roy', text);
-  setStatus('Thinking…');
+  setState('processing');
+  setStatus('Checking your answer…');
   try {
-    const result = await api('POST', '/api/session/message', { text });
-    busy = false;
+    const result = await api('POST', '/api/session/message', { text, ...meta });
+    showHeard('');
     await handle(result);
   } catch (err) {
-    busy = false;
-    setStatus(`Problem: ${err.message}`);
+    setState('idle');
+    setStatus(`Problem: ${err.message}. Tap START TALKING to try again.`);
   }
 }
 
-function stopTalking() {
-  active = false;
-  stopListening();
-  if ('speechSynthesis' in window) speechSynthesis.cancel();
-  talkBtn.textContent = '🎙 START TALKING';
-  talkBtn.setAttribute('aria-pressed', 'false');
-}
-
-talkBtn.addEventListener('click', async () => {
-  if (active) { stopTalking(); setStatus('Paused. Press the button to carry on.'); return; }
-  active = true;
-  silentRetries = 0;
-  talkBtn.textContent = '⏸ PAUSE';
-  talkBtn.setAttribute('aria-pressed', 'true');
+async function startSession() {
+  setState('processing');
   setStatus('Starting…');
   try {
     await handle(await api('POST', '/api/session/start'));
   } catch (err) {
-    stopTalking();
+    setState('idle');
     setStatus(`Problem: ${err.message}`);
   }
+}
+
+talkBtn.addEventListener('click', () => {
+  if (state === 'processing') return;
+  if (state === 'speaking') { stopSpeaking(); listen(); return; }
+  if (state === 'listening') {
+    stopListening();
+    setState('idle');
+    setStatus('Paused. Tap START TALKING to carry on.');
+    showHeard('');
+    return;
+  }
+  silentRetries = 0;
+  if (sessionOpen && listenLang) listen();
+  else startSession();
 });
 
 for (const btn of document.querySelectorAll('.quick button')) {
   btn.addEventListener('click', () => {
-    if (!active) { active = true; talkBtn.textContent = '⏸ PAUSE'; talkBtn.setAttribute('aria-pressed', 'true'); }
+    if (!sessionOpen) { startSession(); return; }
     send(btn.dataset.say);
   });
 }
@@ -211,9 +314,10 @@ $('type-form').addEventListener('submit', (e) => {
   const text = $('type-input').value.trim();
   if (!text) return;
   $('type-input').value = '';
-  if (!active) { active = true; talkBtn.textContent = '⏸ PAUSE'; talkBtn.setAttribute('aria-pressed', 'true'); }
-  send(text);
+  if (!sessionOpen) { startSession(); return; }
+  send(text, { source: 'text' });
 });
 
 if ('speechSynthesis' in window) speechSynthesis.getVoices();
+setState('idle');
 api('GET', '/api/status').then((s) => { renderStatus(s); if (s.session) renderView(s.session); }).catch(() => {});
