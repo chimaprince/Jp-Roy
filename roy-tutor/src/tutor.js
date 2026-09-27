@@ -1,43 +1,32 @@
 import * as store from './db.js';
-import { saidMandarin, hintFor, normZh } from './match.js';
-import { detectIntent, findEntry, ROLES } from './intents.js';
-import { checkPronunciation, checkMeaningLocally, syllablesFor } from './pronunciation.js';
+import { findEntry } from './intents.js';
+import { checkWordRecognition, syllablesWithTones } from './recognition.js';
+import { TeacherNotConfigured } from './teacher.js';
+
+// The tutor engine. It owns the lesson state and the rules that must hold no
+// matter what the AI says: curriculum order, which exercise comes next, when a
+// word counts as complete, daily review, jumps that keep Roy's place, and
+// progress in the database. The AI teacher owns the conversation: each turn it
+// reads the full lesson context plus what Roy said, decides what he meant and
+// whether he showed understanding, and writes the reply.
 
 const REVIEW_LIMIT = 10;
 const WEAK_LIMIT = 5;
-const CONVERSATION_TURNS = 2;
-const MAX_AI_TURNS = 4;
+const TRANSCRIPT_TURNS = 16;
 
-// How the next spoken answer is evaluated.
-const PRONUNCIATION = 'pronunciation'; // say the Mandarin term: checked against the expected characters
-const ANSWER = 'answer'; // answer or converse: checked for meaning, wording is free
-
-// On-screen form of the term: characters, plus the source pinyin when there is one.
-function withPinyin(entry) {
-  return entry.pinyin ? `${entry.mandarin} — ${entry.pinyin}` : entry.mandarin;
-}
-
-// The recogniser's guess that contains the term, if any, else its top guess.
-function bestCandidate(heard, entry) {
-  const all = [heard.text, ...(heard.alternatives ?? [])].filter(Boolean);
-  return all.find((c) => saidMandarin(c, entry)) ?? heard.text;
-}
-
-// Collects what the tutor says. Each segment is spoken in its own language;
-// `show` is the on-screen text when it differs from what is spoken.
-class Reply {
-  constructor() {
-    this.say = [];
-    this.listen = null;
-    this.mode = null;
-    this.promptStart = null;
-  }
-  en(text) { this.say.push({ lang: 'en', text }); return this; }
-  zh(text, opts = {}) { this.say.push({ lang: 'zh', text, ...opts }); return this; }
-  // Everything said after this call is the question that "repeat" will replay.
-  prompt() { this.promptStart = this.say.length; return this; }
-  ask(lang, mode = ANSWER) { this.listen = lang; this.mode = lang ? mode : null; return this; }
-}
+const EXERCISES = ['pronounce', 'meaning', 'sentence', 'roleplay'];
+const EXERCISE_GOALS = {
+  pronounce: 'Roy says the Mandarin term aloud.',
+  meaning: 'Roy explains in English, in his own words, what the term means. Any wording that shows he understands the concept counts.',
+  sentence: 'Roy makes a short Mandarin sentence that uses the term.',
+  roleplay: 'A short interpreting scene (2-3 exchanges). You play the other people; Roy plays his role and must use the term in Mandarin.',
+  review: 'Roy recalls the Mandarin for this English term (he studied it before).',
+};
+// Which recogniser language the microphone uses for each exercise.
+const LISTEN = { pronounce: 'zh-CN', meaning: 'en-US', sentence: 'zh-CN', roleplay: 'zh-CN', review: 'zh-CN' };
+const LANGUAGE_NAME = { 'zh-CN': 'Mandarin (zh-CN)', 'en-US': 'English (en-US)' };
+// How the answer is checked, for the page's hint line.
+const MODE = { pronounce: 'pronunciation', review: 'pronunciation', meaning: 'answer', sentence: 'answer', roleplay: 'answer' };
 
 function localDate(date) {
   return date.toLocaleDateString('en-CA', { timeZone: process.env.TUTOR_TIMEZONE || undefined });
@@ -49,10 +38,23 @@ function listWords(entries) {
   return `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`;
 }
 
+function entryFacts(entry, total) {
+  return {
+    position: entry.position,
+    of: total,
+    english: entry.english,
+    mandarin: entry.mandarin,
+    pinyin: entry.pinyin || null,
+    pinyin_syllables_with_tones: syllablesWithTones(entry),
+    meaning: entry.meaning ?? null,
+    source_page: entry.source_page ?? null,
+  };
+}
+
 export class Tutor {
-  constructor({ db, ai = { enabled: false }, userId = 'roy', userName = 'Roy', now = () => new Date() }) {
+  constructor({ db, teacher, userId = 'roy', userName = 'Roy', now = () => new Date() }) {
     this.db = db;
-    this.ai = ai;
+    this.teacher = teacher ?? { configured: false };
     this.userId = userId;
     this.userName = userName;
     this.now = now;
@@ -63,7 +65,7 @@ export class Tutor {
 
   status() {
     const course = store.activeCourse(this.db);
-    if (!course) return { course: null };
+    if (!course) return { course: null, aiConfigured: Boolean(this.teacher.configured) };
     const progress = store.getProgress(this.db, this.userId, course.id);
     const session = this.#activeSession(course, progress);
     const total = store.courseLength(this.db, course.id);
@@ -76,50 +78,47 @@ export class Tutor {
       finished: progress.current_position > total,
       reviewRequired: Boolean(progress.review_required),
       lastStudyDate: progress.last_study_date,
-      aiEnabled: Boolean(this.ai.enabled),
-      session: session && !session.state.ended ? this.#view(course, session) : null,
+      aiConfigured: Boolean(this.teacher.configured),
+      session: session && !session.state.ended ? this.#view(session) : null,
     };
   }
 
   async start() {
+    this.#requireTeacher();
     const course = store.activeCourse(this.db);
     if (!course || store.courseLength(this.db, course.id) === 0) {
       return { say: [{ lang: 'en', text: 'No curriculum is loaded yet. Please import JH Medics Volume 1.' }], listen: null };
     }
     const progress = store.getProgress(this.db, this.userId, course.id);
     const existing = this.#activeSession(course, progress);
-    const reply = new Reply();
     if (existing && !existing.state.ended) {
-      reply.en(`Welcome back, ${this.userName}. Let's pick up where we left off.`);
-      this.#repeatPrompt(reply, existing);
-      return this.#finish(course, existing, reply);
+      return this.#turn(course, existing, { event: 'session_resume', details: 'Roy is back later the same day. Welcome him back briefly and pick up the current exercise where it was.' });
     }
 
     const today = localDate(this.now());
     const session = store.createSession(this.db, this.userId, course.id, today, this.now().toISOString());
-    session.state = { stage: 'new', lesson: null, review: null, suspended: null, roySide: 'Interpreter', ended: false };
+    session.state = { stage: 'lesson', lesson: null, review: null, suspended: null, roySide: 'Interpreter', transcript: [], ended: false };
     const prev = store.previousStudySession(this.db, this.userId, course.id, today);
     const isNewDay = Boolean(progress.last_study_date) && progress.last_study_date < today;
     let reviewRequired = Boolean(progress.review_required) || (isNewDay && Boolean(prev));
 
+    let greeting;
     if (!progress.last_study_date && !prev) {
-      const total = store.courseLength(this.db, course.id);
-      reply.en(`Welcome, ${this.userName}. This is ${course.title}. We will work through every word in order, starting at word ${progress.current_position} of ${total}.`);
+      greeting = `First ever session. Welcome Roy, say this is ${course.title} and that you will go through it in order, then start the current entry.`;
     } else if (prev) {
       const studied = this.#entries(prev.words_studied.length ? prev.words_studied : prev.words_reviewed);
-      const when = prev.study_date === localDate(new Date(this.now().getTime() - 864e5)) ? 'Yesterday' : `Last time, on ${prev.study_date},`;
-      reply.en(`Welcome back, ${this.userName}. ${when} we studied ${listWords(studied)}.`);
+      const yesterday = prev.study_date === localDate(new Date(this.now().getTime() - 864e5));
+      greeting = `Start with: "Welcome back, Roy. ${yesterday ? 'Yesterday' : `Last time (${prev.study_date})`} we studied ${listWords(studied)}." Then continue as the lesson state says.`;
     } else {
-      reply.en(`Welcome back, ${this.userName}.`);
+      greeting = 'Roy is starting a new session. Welcome him back briefly, then continue as the lesson state says.';
     }
 
     if (reviewRequired) {
       const queue = this.#buildReviewQueue(course, prev);
       if (queue.length) {
         session.state.stage = 'review';
-        session.state.review = { queue, requeued: [], current: null, step: 'ask', misses: 0, forgot: 0 };
-        reply.en(`Let's review ${queue.length === 1 ? 'that word' : `those ${queue.length} words`} before anything new.`);
-        this.#nextReview(reply, course, session, progress);
+        session.state.review = { queue: queue.slice(1), current: queue[0], attempts: 0, requeued: [] };
+        greeting += ' Review comes first: say you will review before anything new, then ask the first review question.';
       } else {
         reviewRequired = false;
       }
@@ -129,78 +128,36 @@ export class Tutor {
       last_session: session.id,
       review_required: reviewRequired ? 1 : 0,
     });
-    if (!reviewRequired) this.#resumeCurriculum(reply, course, session, store.getProgress(this.db, this.userId, course.id));
-    return this.#finish(course, session, reply);
+    if (!reviewRequired) this.#resumeCurriculum(course, session);
+    if (session.state.stage === 'lesson') greeting += ' Introduce the current entry (English, Mandarin, pinyin with tones, the source meaning), then ask Roy to say the Mandarin.';
+    return this.#turn(course, session, { event: 'session_start', details: greeting });
   }
 
-  // `meta` describes where the text came from:
-  // { source: 'voice'|'text', alternatives: string[], confidence: number }
+  // `meta`: { source: 'voice'|'text', alternatives: string[], confidence: number, language: string }
   async message(text, meta = {}) {
+    this.#requireTeacher();
     const course = store.activeCourse(this.db);
     if (!course) return this.start();
     const progress = store.getProgress(this.db, this.userId, course.id);
     const session = this.#activeSession(course, progress);
     if (!session || session.state.ended) return this.start();
 
-    const reply = new Reply();
-    const intent = detectIntent(text);
-    const s = session.state;
-    intent.heard = {
+    const heard = {
       text: String(text ?? '').trim(),
       alternatives: (meta.alternatives ?? []).map(String).filter((a) => a.trim()).slice(0, 5),
       confidence: typeof meta.confidence === 'number' ? meta.confidence : null,
       source: meta.source === 'voice' ? 'voice' : 'text',
+      language: meta.language || this.#listenLanguage(session),
     };
-
-    switch (intent.type) {
-      case 'empty':
-        reply.en("I didn't catch that.");
-        this.#repeatPrompt(reply, session);
-        break;
-      case 'end':
-        return this.end();
-      case 'repeat':
-        this.#repeatPrompt(reply, session);
-        break;
-      case 'continue':
-        if (s.lesson?.jump) this.#returnFromJump(reply, course, session);
-        else { reply.en("Okay, let's continue."); this.#repeatPrompt(reply, session); }
-        break;
-      case 'backToCurriculum':
-        if (s.lesson?.jump) this.#returnFromJump(reply, course, session);
-        else { reply.en("We're already on the curriculum."); this.#repeatPrompt(reply, session); }
-        break;
-      case 'dontUnderstand': {
-        const entry = this.#currentEntry(session);
-        if (entry) this.#explain(reply, entry);
-        this.#repeatPrompt(reply, session);
-        break;
-      }
-      case 'jump':
-        this.#jump(reply, course, session, progress, intent.target);
-        break;
-      case 'role':
-        this.#setRole(reply, course, session, intent);
-        if (s.lesson?.step === 'conversation') await this.#startConversation(reply, course, session);
-        else this.#repeatPrompt(reply, session);
-        break;
-      default:
-        if (s.stage === 'review') await this.#handleReview(reply, course, session, progress, intent);
-        else if (s.lesson) await this.#handleLesson(reply, course, session, progress, intent);
-        else if (s.stage === 'done') reply.en(`You have finished ${course.title}. Say "jump to" and a word to practise it again.`);
-        else this.#resumeCurriculum(reply, course, session, progress);
-    }
-    return this.#finish(course, session, reply);
+    return this.#turn(course, session, { event: 'student_turn', heard });
   }
 
-  end() {
+  async end(farewell = []) {
     const course = store.activeCourse(this.db);
     const progress = course && store.getProgress(this.db, this.userId, course.id);
     const session = course && this.#activeSession(course, progress);
-    const reply = new Reply();
     if (!session || session.state.ended) {
-      reply.en(`See you next time, ${this.userName}.`);
-      return { say: reply.say, listen: null, ended: true, status: this.status() };
+      return { say: [{ lang: 'en', text: `See you next time, ${this.userName}.` }], listen: null, ended: true, status: this.status() };
     }
     const studied = this.#entries(session.words_studied);
     const reviewed = this.#entries(session.words_reviewed);
@@ -214,17 +171,194 @@ export class Tutor {
     session.state.ended = true;
     store.saveSession(this.db, session);
     store.updateProgress(this.db, this.userId, course.id, { last_session: session.id });
-    reply.en(`Good work today, ${this.userName}. ${session.summary} Your place is saved.`);
-    return { say: reply.say, listen: null, ended: true, status: this.status() };
+    const say = farewell.length ? farewell : [{ lang: 'en', text: `Good work today, ${this.userName}.` }];
+    return { say: [...say, { lang: 'en', text: `${session.summary} Your place is saved.` }], listen: null, ended: true, status: this.status() };
   }
 
-  // ---------- session helpers ----------
+  // ---------- one turn: context → AI teacher → apply decision ----------
+
+  async #turn(course, session, event) {
+    const s = session.state;
+    s.transcript ??= [];
+    if (event.heard) s.transcript.push({ who: 'roy', text: event.heard.text, input: event.heard.source });
+
+    let decision = await this.teacher.decide(this.#context(course, session, event));
+    const followUp = this.#apply(course, session, decision, event);
+    if (followUp?.end) {
+      s.transcript.push({ who: 'tutor', text: speechText(decision.speech) });
+      store.saveSession(this.db, session);
+      return this.end(toSegments(decision.speech));
+    }
+    if (followUp?.event) {
+      // The state changed in a way the first reply could not know about (a jump,
+      // returning from one): ask the teacher again with the new state.
+      decision = await this.teacher.decide(this.#context(course, session, followUp.event));
+    }
+    s.transcript.push({ who: 'tutor', text: speechText(decision.speech) });
+    s.transcript = s.transcript.slice(-TRANSCRIPT_TURNS * 2);
+    s.lastDecision = { intent: decision.intent, correct: decision.correct, exercise_complete: decision.exercise_complete, notes: decision.notes };
+    store.saveSession(this.db, session);
+    const listen = s.stage === 'done' ? null : this.#listenLanguage(session);
+    return {
+      say: toSegments(decision.speech),
+      listen,
+      mode: listen ? MODE[this.#exercise(session)] : null,
+      ...this.#view(session),
+      status: this.status(),
+    };
+  }
+
+  #apply(course, session, d, event) {
+    const s = session.state;
+    if (!event.heard) return null; // session start/resume or follow-up: narration only
+
+    if (d.intent === 'stop' || d.next_action === 'end_session') return { end: true };
+
+    if (d.intent === 'jump_request' && d.jump_target) {
+      const entry = findEntry(store.allEntries(this.db, course.id), d.jump_target);
+      if (!entry) {
+        return { event: { event: 'jump_not_found', details: `Roy asked to go to "${d.jump_target}", which is not in ${course.title}. Say so briefly and carry on with the current exercise.` } };
+      }
+      const progress = store.getProgress(this.db, this.userId, course.id);
+      if (s.lesson && !s.lesson.jump && s.lesson.entryId === entry.id) {
+        return { event: { event: 'jump_to_current', details: 'Roy asked for the entry he is already on. Say so and continue the current exercise.' } };
+      }
+      if (!s.lesson?.jump) s.suspended = { stage: s.stage, lesson: s.lesson, review: s.review };
+      s.stage = 'lesson';
+      s.review = null;
+      s.lesson = newLesson(entry.id, true);
+      return { event: { event: 'jump_started', details: `Side trip to entry ${entry.position} (${entry.english}) at Roy's request. His curriculum place stays at word ${progress.current_position}; say so. Introduce this entry and ask him to say the Mandarin.` } };
+    }
+
+    if ((d.intent === 'continue' || d.next_action === 'resume') && s.lesson?.jump) {
+      this.#returnFromJump(course, session);
+      return { event: { event: 'returned_from_jump', details: 'Roy ended the side trip. Say you are back on the curriculum and continue the current exercise.' } };
+    }
+
+    if (d.roleplay_role) s.roySide = d.roleplay_role;
+
+    const l = s.lesson;
+    if (s.stage === 'lesson' && l && (d.intent === 'roleplay_request' || d.next_action === 'switch_to_roleplay') && l.exercise !== 'roleplay') {
+      l.exercise = 'roleplay';
+      l.attempts = 0;
+    }
+
+    if (d.intent === 'answer') {
+      if (d.correct === false) {
+        if (s.stage === 'review') s.review.attempts += 1;
+        else if (l) { l.mistakes += 1; l.attempts += 1; }
+      }
+    } else if (['uncertain', 'hint_request'].includes(d.intent) && l && s.stage === 'lesson') {
+      l.struggles += 1;
+    }
+
+    if (!d.exercise_complete) return null;
+    if (s.stage === 'review') {
+      this.#finishReviewItem(course, session, d.correct === true);
+      return null;
+    }
+    if (s.stage === 'lesson' && l) {
+      // Only an actual answer can complete an exercise; "let's continue" cannot skip one.
+      if (d.intent !== 'answer' || d.correct === false) {
+        console.warn(`ignored exercise_complete for intent=${d.intent} correct=${d.correct}`);
+        return null;
+      }
+      l.passed[l.exercise] = true;
+      const next = EXERCISES.find((x) => !l.passed[x]);
+      if (next) { l.exercise = next; l.attempts = 0; }
+      else this.#completeEntry(course, session);
+    }
+    return null;
+  }
+
+  // Everything the teacher needs for this turn.
+  #context(course, session, event) {
+    const s = session.state;
+    const total = store.courseLength(this.db, course.id);
+    const progress = store.getProgress(this.db, this.userId, course.id);
+    const entry = this.#currentEntry(session);
+    const exercise = this.#exercise(session);
+    const ctx = {
+      event: event.event,
+      event_details: event.details ?? null,
+      student: { name: this.userName, roleplay_role: s.roySide },
+      course: { title: course.title, total_entries: total, curriculum_position: progress.current_position, completed_entries: store.completedCount(this.db, this.userId, course.id) },
+      lesson_state: {
+        stage: s.stage,
+        exercise,
+        exercise_goal: exercise ? EXERCISE_GOALS[exercise] : null,
+        exercises_passed: s.lesson ? EXERCISES.filter((x) => s.lesson.passed[x]) : [],
+        wrong_attempts_this_exercise: s.stage === 'review' ? s.review?.attempts ?? 0 : s.lesson?.attempts ?? 0,
+        side_trip: Boolean(s.lesson?.jump),
+        review_items_left_after_this: s.stage === 'review' ? s.review.queue.length : null,
+        microphone_language_now: LANGUAGE_NAME[this.#listenLanguage(session)] ?? null,
+      },
+      current_entry: entry ? entryFacts(entry, total) : null,
+      if_complete: this.#previewIfComplete(course, session),
+      recent_entries: this.#recentEntries(course, entry),
+      weak_words: store.weakEntries(this.db, this.userId, course.id, WEAK_LIMIT).map((e) => ({ english: e.english, mandarin: e.mandarin })),
+      conversation_so_far: (s.transcript ?? []).slice(-TRANSCRIPT_TURNS, event.heard ? -1 : undefined),
+      roy_said: null,
+    };
+    if (event.heard) {
+      const h = event.heard;
+      const mandarinExpected = LISTEN[exercise] === 'zh-CN';
+      ctx.roy_said = {
+        text: h.text,
+        input: h.source === 'voice' ? 'voice (speech recognition transcript)' : 'typed (text fallback, no audio)',
+        recogniser_language: h.source === 'voice' ? h.language : null,
+        recogniser_alternatives: h.alternatives,
+        recogniser_confidence: h.confidence,
+        word_recognition: entry && mandarinExpected && h.source === 'voice' ? wordRecognitionReport(entry, h) : null,
+        pronunciation_assessment: null,
+        pronunciation_assessment_note: 'No audio analysis is available, so tones and accent cannot be judged.',
+      };
+    }
+    return ctx;
+  }
+
+  // What happens if the teacher marks the current exercise complete now.
+  #previewIfComplete(course, session) {
+    const s = session.state;
+    const total = store.courseLength(this.db, course.id);
+    if (s.stage === 'review' && s.review) {
+      if (s.review.queue.length) {
+        const next = store.entryById(this.db, s.review.queue[0]);
+        return { then: 'next review item', instruction: `Ask Roy how to say "${next.english}" in Mandarin.`, microphone_language: LANGUAGE_NAME['zh-CN'] };
+      }
+      const progress = store.getProgress(this.db, this.userId, course.id);
+      const next = store.entryAt(this.db, course.id, progress.current_position);
+      if (!next) return { then: 'course finished', instruction: 'Review is done and every entry has been studied. Congratulate Roy.' };
+      return { then: 'review finished, new entry', instruction: 'Say the review is done, then introduce this entry (English, Mandarin, pinyin with tones, source meaning) and ask Roy to say the Mandarin.', next_entry: entryFacts(next, total), microphone_language: LANGUAGE_NAME['zh-CN'] };
+    }
+    const l = s.lesson;
+    if (!l) return null;
+    const next = EXERCISES.find((x) => x !== l.exercise && !l.passed[x]);
+    if (next) {
+      return { then: `exercise "${next}"`, instruction: `Start the ${next} exercise: ${EXERCISE_GOALS[next]}`, microphone_language: LANGUAGE_NAME[LISTEN[next]] };
+    }
+    if (l.jump) {
+      return { then: 'side trip finished', instruction: 'Say this entry is done and that you are going back to the curriculum; the app will then continue where Roy was.' };
+    }
+    const upcoming = store.entryAt(this.db, course.id, store.entryById(this.db, l.entryId).position + 1);
+    if (!upcoming) return { then: 'course finished', instruction: `This was the last entry of ${course.title}. Congratulate Roy.` };
+    return { then: 'entry complete, next entry', instruction: 'Tell Roy this word is complete, then introduce the next entry (English, Mandarin, pinyin with tones, source meaning) and ask him to say the Mandarin.', next_entry: entryFacts(upcoming, total), microphone_language: LANGUAGE_NAME['zh-CN'] };
+  }
+
+  // ---------- state helpers ----------
+
+  #requireTeacher() {
+    if (!this.teacher.configured) throw new TeacherNotConfigured();
+  }
 
   #activeSession(course, progress) {
     if (!progress.last_session) return null;
     const session = store.getSession(this.db, progress.last_session);
     if (!session || session.course_id !== course.id) return null;
     if (session.study_date !== localDate(this.now())) return null;
+    // Sessions saved by the old scripted engine have a different shape; start a
+    // fresh session instead (progress lives in the progress tables, not here).
+    if (!Array.isArray(session.state.transcript)) return null;
     return session;
   }
 
@@ -232,23 +366,43 @@ export class Tutor {
     return ids.map((id) => store.entryById(this.db, id)).filter(Boolean);
   }
 
-  #finish(course, session, reply) {
-    if (reply.promptStart !== null) {
-      session.state.lastPrompt = { say: reply.say.slice(reply.promptStart), listen: reply.listen, mode: reply.mode };
-    }
-    store.saveSession(this.db, session);
-    return { say: reply.say, listen: reply.listen, mode: reply.mode, ...this.#view(course, session), status: this.status() };
+  #exercise(session) {
+    const s = session.state;
+    if (s.stage === 'review') return 'review';
+    if (s.stage === 'lesson' && s.lesson) return s.lesson.exercise;
+    return null;
   }
 
-  #view(course, session) {
+  #listenLanguage(session) {
+    return LISTEN[this.#exercise(session)] ?? null;
+  }
+
+  #currentEntry(session) {
+    const s = session.state;
+    if (s.stage === 'review' && s.review?.current) return store.entryById(this.db, s.review.current);
+    if (s.lesson) return store.entryById(this.db, s.lesson.entryId);
+    return null;
+  }
+
+  #recentEntries(course, entry) {
+    if (!entry) return [];
+    return this.db.prepare(`
+      SELECT c.english, c.mandarin, c.pinyin FROM curriculum c
+      JOIN entry_progress ep ON ep.entry_id = c.id AND ep.user_id = ? AND ep.completed = 1
+      WHERE c.course_id = ? AND c.position < ? ORDER BY c.position DESC LIMIT 5`).all(this.userId, course.id, entry.position);
+  }
+
+  #view(session) {
     const s = session.state;
     const entry = this.#currentEntry(session);
+    const exercise = this.#exercise(session);
     let hide = [];
-    if (s.stage === 'review' && s.review?.step === 'ask') hide = ['mandarin', 'pinyin'];
-    if (s.lesson?.step === 'recognize') hide = ['english', 'meaning'];
-    const stage = s.stage === 'review' ? 'review' : s.lesson?.step === 'conversation' ? 'conversation' : s.stage === 'done' ? 'done' : 'new';
+    if (exercise === 'review') hide = ['mandarin', 'pinyin'];
+    if (exercise === 'meaning') hide = ['english', 'meaning'];
+    const stage = s.stage === 'review' ? 'review' : exercise === 'roleplay' ? 'conversation' : s.stage === 'done' ? 'done' : 'new';
     return {
       stage,
+      exercise,
       jump: Boolean(s.lesson?.jump),
       role: s.roySide,
       card: entry
@@ -264,30 +418,20 @@ export class Tutor {
     };
   }
 
-  #currentEntry(session) {
-    const s = session.state;
-    if (s.stage === 'review' && s.review?.current) return store.entryById(this.db, s.review.current);
-    if (s.lesson) return store.entryById(this.db, s.lesson.entryId);
-    return null;
-  }
+  // ---------- curriculum progression ----------
 
-  #repeatPrompt(reply, session) {
-    const last = session.state.lastPrompt;
-    if (!last) return;
-    reply.prompt();
-    reply.say.push(...last.say);
-    reply.ask(last.listen, last.mode ?? ANSWER);
+  #resumeCurriculum(course, session) {
+    const progress = store.getProgress(this.db, this.userId, course.id);
+    const entry = store.entryAt(this.db, course.id, progress.current_position);
+    session.state.review = null;
+    if (!entry) {
+      session.state.stage = 'done';
+      session.state.lesson = null;
+      return;
+    }
+    session.state.stage = 'lesson';
+    session.state.lesson = newLesson(entry.id, false);
   }
-
-  #explain(reply, entry) {
-    reply.en(`Let's go over it again. The English term is ${entry.english}.`);
-    reply.en('In Mandarin:').zh(entry.mandarin);
-    reply.zh(entry.mandarin, { rate: 0.6, show: entry.pinyin ? `Pinyin: ${entry.pinyin}` : entry.mandarin });
-    if (entry.meaning) reply.en(`The JH Medics meaning is: ${entry.meaning}`);
-    else reply.en(`The JH Medics meaning for this entry has not been loaded yet, so I will only use the English term: ${entry.english}.`);
-  }
-
-  // ---------- review ----------
 
   #buildReviewQueue(course, prev) {
     const ids = [];
@@ -296,450 +440,37 @@ export class Tutor {
     return [...new Set(ids)].slice(0, REVIEW_LIMIT);
   }
 
-  #nextReview(reply, course, session, progress) {
-    const r = session.state.review;
-    const id = r.queue.shift();
-    if (!id) {
-      session.state.review = null;
-      session.state.stage = 'new';
-      store.updateProgress(this.db, this.userId, course.id, { review_required: 0 });
-      reply.en('Review complete. Now, new words.');
-      this.#resumeCurriculum(reply, course, session, store.getProgress(this.db, this.userId, course.id));
-      return;
-    }
-    Object.assign(r, { current: id, step: 'ask', misses: 0, forgot: 0, repeats: 0 });
-    const entry = store.entryById(this.db, id);
-    reply.prompt().en(`How do you say "${entry.english}" in Mandarin?`).ask('zh-CN', PRONUNCIATION);
-  }
-
-  async #handleReview(reply, course, session, progress, intent) {
+  #finishReviewItem(course, session, correct) {
     const r = session.state.review;
     const entry = store.entryById(this.db, r.current);
-    if (r.step === 'repeat') {
-      if (intent.type === 'forgot' || intent.type === 'dontUnderstand') {
-        reply.en('Listen.').zh(entry.mandarin, { rate: 0.6, show: withPinyin(entry) });
-        reply.prompt().en('Say it after me.').ask('zh-CN', PRONUNCIATION);
-        return;
-      }
-      const check = checkPronunciation(entry, intent.heard);
-      await this.#pronunciationFeedback(reply, session, entry, check, intent.heard);
-      r.repeats = (r.repeats ?? 0) + 1;
-      if (!check.passed && r.repeats < 3) {
-        this.#modelPronunciation(reply, entry, r.repeats + 1);
-        reply.prompt().en('Say it after me.').zh(entry.mandarin, { rate: 0.7 }).ask('zh-CN', PRONUNCIATION);
-        return;
-      }
-      if (!check.passed) reply.en("We'll come back to this one.");
-      this.#nextReview(reply, course, session, progress);
-      return;
-    }
-    if (intent.type === 'forgot') {
-      r.forgot += 1;
-      if (r.forgot === 1) {
-        const { firstChar, firstSyllable } = hintFor(entry);
-        reply.en('Here is a hint. It starts with').zh(firstChar, firstSyllable ? { show: `${firstChar} (${firstSyllable})` } : {});
-        reply.prompt().en(`Try again: "${entry.english}" in Mandarin?`).ask('zh-CN', PRONUNCIATION);
-        return;
-      }
-      this.#reviewMiss(reply, session, entry, true);
-      return;
-    }
-    const check = checkPronunciation(entry, intent.heard);
-    if (check.passed) {
-      const ep = store.getEntryProgress(this.db, this.userId, entry.id);
-      const firstTry = r.misses === 0 && r.forgot === 0;
-      const confidence = Math.min(5, ep.confidence + (firstTry ? 1 : 0));
-      store.updateEntryProgress(this.db, this.userId, entry.id, {
-        times_practiced: ep.times_practiced + 1,
-        last_reviewed: this.now().toISOString(),
-        confidence,
-        weak: firstTry && confidence >= 3 ? 0 : ep.weak,
-      });
-      if (!session.words_reviewed.includes(entry.id)) session.words_reviewed.push(entry.id);
-      await this.#pronunciationFeedback(reply, session, entry, check, intent.heard);
-      reply.zh(entry.mandarin, { show: withPinyin(entry) });
-      this.#nextReview(reply, course, session, progress);
-      return;
-    }
-    r.misses += 1;
-    await this.#pronunciationFeedback(reply, session, entry, check, intent.heard);
-    if (r.misses === 1) {
-      const { firstChar, firstSyllable } = hintFor(entry);
-      reply.en('Not quite. It starts with').zh(firstChar, firstSyllable ? { show: `${firstChar} (${firstSyllable})` } : {});
-      reply.prompt().en(`Try again: "${entry.english}" in Mandarin?`).ask('zh-CN', PRONUNCIATION);
-      return;
-    }
-    this.#reviewMiss(reply, session, entry, false);
-  }
-
-  #reviewMiss(reply, session, entry, forgot) {
-    const r = session.state.review;
-    this.#markWeak(session, entry);
-    if (!r.requeued.includes(entry.id)) { r.requeued.push(entry.id); r.queue.push(entry.id); }
-    reply.en(forgot ? `The answer is:` : `The correct answer for "${entry.english}" is:`);
-    reply.zh(entry.mandarin, { show: withPinyin(entry) });
-    Object.assign(r, { step: 'repeat', repeats: 0 });
-    reply.prompt().en('Say it after me.').zh(entry.mandarin, { rate: 0.7 }).ask('zh-CN', PRONUNCIATION);
-  }
-
-  #markWeak(session, entry) {
     const ep = store.getEntryProgress(this.db, this.userId, entry.id);
-    store.updateEntryProgress(this.db, this.userId, entry.id, { weak: 1, confidence: Math.max(0, ep.confidence - 1) });
-    if (!session.weak_words.includes(entry.id)) session.weak_words.push(entry.id);
-  }
-
-  // ---------- lessons ----------
-
-  #resumeCurriculum(reply, course, session, progress) {
-    const entry = store.entryAt(this.db, course.id, progress.current_position);
-    if (!entry) {
-      session.state.stage = 'done';
-      session.state.lesson = null;
-      reply.en(`You have completed every word in ${course.title}. Well done! You can still say "jump to" and a word to practise it.`);
-      return;
-    }
-    session.state.stage = 'new';
-    this.#startLesson(reply, course, session, entry, false);
-  }
-
-  #startLesson(reply, course, session, entry, jump) {
-    const total = store.courseLength(this.db, course.id);
-    session.state.lesson = { entryId: entry.id, step: 'pronounce', attempts: 0, forgot: 0, mistakes: 0, jump, conv: null };
-    reply.en(jump ? `Word ${entry.position} of ${total}, as a side trip.` : `Word ${entry.position} of ${total}.`);
-    reply.en(`The English term is: ${entry.english}.`);
-    reply.en('In Mandarin:').zh(entry.mandarin);
-    if (entry.pinyin) reply.en('Pinyin:').zh(entry.mandarin, { rate: 0.6, show: entry.pinyin });
-    else reply.en('The JH Medics source gives no pinyin for this entry.');
-    if (entry.meaning) reply.en(`Meaning, from JH Medics: ${entry.meaning}`);
-    else reply.en('The JH Medics meaning for this entry has not been loaded yet.');
-    this.#askPronounce(reply, entry);
-  }
-
-  async #handleLesson(reply, course, session, progress, intent) {
-    const l = session.state.lesson;
-    const entry = store.entryById(this.db, l.entryId);
-    switch (l.step) {
-      case 'pronounce': return this.#stepPronounce(reply, session, l, entry, intent);
-      case 'recognize': return this.#stepRecognize(reply, course, l, entry, intent);
-      case 'sentence': return this.#stepSentence(reply, course, session, l, entry, intent);
-      case 'conversation': return this.#stepConversation(reply, course, session, l, entry, intent);
-    }
-  }
-
-  // MODE 1: pronunciation. Repeats until the recogniser hears the term.
-  #askPronounce(reply, entry) {
-    reply.prompt().en('Now you say it.').zh(entry.mandarin, { rate: 0.7 }).ask('zh-CN', PRONUNCIATION);
-  }
-
-  async #stepPronounce(reply, session, l, entry, intent) {
-    if (intent.type === 'forgot') {
-      reply.en('Listen carefully.').zh(entry.mandarin, { rate: 0.6, show: withPinyin(entry) });
-      reply.prompt().en('Your turn.').ask('zh-CN', PRONUNCIATION);
-      return;
-    }
-    const check = checkPronunciation(entry, intent.heard);
-    await this.#pronunciationFeedback(reply, session, entry, check, intent.heard);
-    if (check.passed) return this.#askRecognize(reply, l, entry);
-    l.attempts += 1;
-    if (l.attempts <= 2) l.mistakes += 1;
-    this.#modelPronunciation(reply, entry, l.attempts);
-    reply.prompt().en('Try again. Say').zh(entry.mandarin, { rate: 0.7 }).ask('zh-CN', PRONUNCIATION);
-  }
-
-  // Slows down as Roy keeps trying: whole word, then syllable by syllable.
-  #modelPronunciation(reply, entry, attempts) {
-    if (attempts < 3) {
-      reply.en('Listen again.').zh(entry.mandarin, { rate: 0.6, show: withPinyin(entry) });
-      return;
-    }
-    reply.en("Let's take it one syllable at a time.");
-    const syllables = syllablesFor(entry);
-    [...normZh(entry.mandarin)].forEach((char, i) => {
-      reply.zh(char, { rate: 0.5, show: syllables[i] ? `${char} ${syllables[i]}` : char });
+    const firstTry = correct && r.attempts === 0;
+    store.updateEntryProgress(this.db, this.userId, entry.id, {
+      times_practiced: ep.times_practiced + 1,
+      last_reviewed: this.now().toISOString(),
+      confidence: correct ? Math.min(5, ep.confidence + (firstTry ? 1 : 0)) : Math.max(0, ep.confidence - 1),
+      weak: correct ? (firstTry && ep.confidence + 1 >= 3 ? 0 : ep.weak) : 1,
     });
-    reply.en('Now the whole term:').zh(entry.mandarin, { rate: 0.6, show: withPinyin(entry) });
-  }
-
-  async #pronunciationFeedback(reply, session, entry, check, heard) {
-    if (check.typed) {
-      // Typed input is a stand-in for the microphone: it checks the word, never pronunciation.
-      if (check.passed) reply.en('Text fallback: that is the right word. Pronunciation was not tested, because typing cannot test it.');
-      else reply.en(`Text fallback: you typed "${check.heard}". That is not the term. Pronunciation was not tested. The term is`).zh(entry.mandarin, { show: withPinyin(entry) });
+    if (!session.words_reviewed.includes(entry.id)) session.words_reviewed.push(entry.id);
+    if (!correct) {
+      if (!session.weak_words.includes(entry.id)) session.weak_words.push(entry.id);
+      if (!r.requeued.includes(entry.id)) { r.requeued.push(entry.id); r.queue.push(entry.id); }
+    }
+    const next = r.queue.shift();
+    if (next) {
+      Object.assign(r, { current: next, attempts: 0 });
       return;
     }
-    if (check.verdict === 'correct') {
-      reply.en(check.lowConfidence ? 'Correct, but the speech recogniser was not very sure. Say it a little more clearly next time.' : 'Correct! I heard').zh(entry.mandarin);
-      return;
-    }
-    if (!session.state.pronNoteGiven) {
-      session.state.pronNoteGiven = true;
-      reply.en("A note on how I check: I go by what the speech recogniser writes down. I can tell which syllables it heard, but I can't measure your tones directly.");
-    }
-    if (check.verdict === 'close') {
-      const viaPinyin = check.via && !/\p{Script=Han}/u.test(check.via);
-      reply.en(viaPinyin
-        ? `Good. I heard the right syllables, "${check.via}", but I can't check the tones from that.`
-        : `Close. The recogniser first wrote "${check.heard}", but it also heard the right term. Say it a little more clearly.`);
-      return;
-    }
-    reply.en(check.heard ? `I heard "${check.heard}".` : "I didn't hear any Mandarin.");
-    let explained = false;
-    if (this.ai.enabled && check.heard) {
-      try {
-        const result = await this.ai.explainPronunciation({ entry, check, alternatives: heard.alternatives ?? [] });
-        for (const line of result.feedback) reply.say.push({ lang: line.lang, text: line.text });
-        explained = true;
-      } catch (err) {
-        console.error('pronunciation feedback failed, using the basic feedback:', err.message);
-      }
-    }
-    if (explained) return;
-    if (check.verdict === 'partial') {
-      reply.en('Some of it was right. The part to work on:');
-      for (const m of check.missing) reply.zh(m.char, { show: m.syllable ? `${m.char} (${m.syllable})` : m.char });
-    } else {
-      reply.en("That didn't sound like the term yet.");
-    }
+    store.updateProgress(this.db, this.userId, course.id, { review_required: 0 });
+    this.#resumeCurriculum(course, session);
   }
 
-  // MODE 2: does Roy know what the term means? Any natural answer that shows
-  // the meaning is accepted.
-  #askRecognize(reply, l, entry) {
-    Object.assign(l, { step: 'recognize', attempts: 0, forgot: 0 });
-    reply.prompt().en('What does').zh(entry.mandarin).en('mean? Answer in English, in your own words.').ask('en-US', ANSWER);
-  }
-
-  async #stepRecognize(reply, course, l, entry, intent) {
-    if (intent.type === 'forgot') {
-      l.forgot += 1;
-      if (l.forgot === 1) {
-        reply.en(`Hint: the English starts with "${entry.english.slice(0, 2)}".`);
-        reply.prompt().en('What does').zh(entry.mandarin).en('mean?').ask('en-US', ANSWER);
-        return;
-      }
-      this.#revealMeaning(reply, entry);
-      return;
-    }
-    const answer = intent.heard.text;
-    let result = null;
-    if (this.ai.enabled) {
-      try {
-        result = await this.ai.checkMeaning({ entry, known: this.#known(course), answer });
-        for (const line of result.feedback) reply.say.push({ lang: line.lang, text: line.text });
-      } catch (err) {
-        console.error('meaning check failed, using the basic check:', err.message);
-        result = null;
-      }
-    }
-    if (!result) {
-      const local = checkMeaningLocally(entry, answer);
-      result = { correct: local.correct };
-      if (local.correct) reply.en(`Correct. It means "${entry.english}".`);
-      else reply.en(`You said "${answer}". That isn't what`).zh(entry.mandarin).en('means.');
-    }
-    if (result.correct) return this.#askSentence(reply, l, entry);
-    l.attempts += 1;
-    if (l.attempts <= 2) l.mistakes += 1;
-    if (l.attempts === 1) {
-      reply.prompt().en('Try again. What does').zh(entry.mandarin).en('mean?').ask('en-US', ANSWER);
-      return;
-    }
-    this.#revealMeaning(reply, entry);
-  }
-
-  #revealMeaning(reply, entry) {
-    reply.zh(entry.mandarin).en(`means "${entry.english}".`);
-    if (entry.meaning) reply.en(`From JH Medics: ${entry.meaning}`);
-    reply.prompt().en('Now tell me in your own words: what does').zh(entry.mandarin).en('mean?').ask('en-US', ANSWER);
-  }
-
-  #askSentence(reply, l, entry) {
-    Object.assign(l, { step: 'sentence', attempts: 0, forgot: 0 });
-    reply.prompt().en('Now make a short sentence in Mandarin using').zh(entry.mandarin).ask('zh-CN', ANSWER);
-  }
-
-  #exampleSentence(reply, entry) {
-    reply.en(`A simple pattern: "This is ${entry.english}" is`).zh(`这是${entry.mandarin}。`);
-  }
-
-  async #stepSentence(reply, course, session, l, entry, intent) {
-    if (intent.type === 'forgot' || intent.type === 'dontUnderstand') {
-      this.#exampleSentence(reply, entry);
-      reply.prompt().en('Now try your own sentence with').zh(entry.mandarin).ask('zh-CN', ANSWER);
-      return;
-    }
-    const sentence = bestCandidate(intent.heard, entry);
-    l.attempts += 1;
-    let ok = null;
-    if (this.ai.enabled) {
-      try {
-        const result = await this.ai.checkSentence({ entry, known: this.#known(course), sentence });
-        for (const line of result.feedback) reply.say.push({ lang: line.lang, text: line.text });
-        if (!result.correct && result.corrected_sentence) reply.en('A correct version:').zh(result.corrected_sentence);
-        ok = result.correct;
-      } catch (err) {
-        console.error('sentence check failed, using the basic check:', err.message);
-      }
-    }
-    if (ok === null) {
-      const used = saidMandarin(sentence, entry);
-      const longer = normZh(sentence).length > normZh(entry.mandarin).length;
-      ok = used && longer;
-      if (ok) reply.en('Good, you used').zh(entry.mandarin).en('in a sentence.');
-      else if (used) reply.en('You said the word. Now put it in a full sentence.');
-      else reply.en(`${intent.heard.source === 'voice' ? 'I heard' : 'You typed'} "${sentence}". Your sentence needs to include`).zh(entry.mandarin);
-    }
-    if (ok) return this.#startConversation(reply, course, session);
-    if (l.attempts <= 2) l.mistakes += 1;
-    if (l.attempts >= 2) this.#exampleSentence(reply, entry);
-    reply.prompt().en('Try once more.').ask('zh-CN', ANSWER);
-  }
-
-  #known(course) {
-    return store.allEntries(this.db, course.id).filter((e) => {
-      const ep = this.db.prepare('SELECT completed FROM entry_progress WHERE user_id = ? AND entry_id = ?').get(this.userId, e.id);
-      return ep?.completed;
-    });
-  }
-
-  // ---------- role-play ----------
-
-  #setRole(reply, course, session, intent) {
-    if (!intent.role) {
-      reply.en(`You are playing the ${session.state.roySide.toLowerCase()}. You can choose: ${ROLES.join(', ')}.`);
-      return;
-    }
-    session.state.roySide = intent.role;
-    reply.en(`Okay, in role-play you are the ${intent.role.toLowerCase()}.`);
-    if (session.state.lesson && session.state.lesson.step !== 'conversation') {
-      reply.en("We'll use that role in this word's conversation practice.");
-    }
-  }
-
-  async #startConversation(reply, course, session) {
-    const l = session.state.lesson;
-    const entry = store.entryById(this.db, l.entryId);
-    l.step = 'conversation';
-    l.conv = { history: [], turns: 0, used: 0, scripted: !this.ai.enabled };
-    reply.en(`Role-play time. You are the ${session.state.roySide.toLowerCase()}.`);
-    if (this.ai.enabled) {
-      try {
-        const result = await this.ai.rolePlay({
-          entry, known: this.#known(course), role: 'the other people in the scene',
-          roySide: session.state.roySide, history: [], royText: null,
-        });
-        l.conv.history = result.history;
-        reply.prompt();
-        for (const line of result.lines) reply.say.push({ lang: line.lang, text: line.text });
-        reply.ask('zh-CN', ANSWER);
-        return;
-      } catch (err) {
-        console.error('role-play failed, using the scripted scene:', err.message);
-        l.conv.scripted = true;
-      }
-    }
-    this.#scriptedTurn(reply, session, entry);
-  }
-
-  #scriptLines(roySide, entry) {
-    const term = entry.english;
-    const lines = {
-      Interpreter: [
-        `The doctor says: "We need to discuss the ${term}." Interpret that for the patient in Mandarin.`,
-        `The nurse says: "Please tell the patient about the ${term}." Say it to the patient in Mandarin.`,
-      ],
-      Doctor: [
-        `The patient asks, through the interpreter: "Doctor, what is ${term}?" Answer using the Mandarin term.`,
-        `The nurse asks: "Should I prepare for the ${term}?" Reply in Mandarin, using the term.`,
-      ],
-      Patient: [
-        `The doctor says: "Today we will talk about ${term}." Tell the doctor, in Mandarin, which term you heard.`,
-        `The nurse asks: "Do you have questions about the ${term}?" Ask your question in Mandarin, using the term.`,
-      ],
-      Nurse: [
-        `The doctor says: "Please prepare the patient for the ${term}." Tell the patient in Mandarin.`,
-        `The patient asks: "What is happening next?" Answer in Mandarin, using the term.`,
-      ],
-      'Hospital staff': [
-        `A patient at the front desk says they are here about the ${term}. Confirm it in Mandarin.`,
-        `The doctor asks you to tell the family about the ${term}. Say it in Mandarin.`,
-      ],
-    };
-    return lines[roySide] ?? lines.Interpreter;
-  }
-
-  #scriptedTurn(reply, session, entry) {
-    const l = session.state.lesson;
-    const line = this.#scriptLines(session.state.roySide, entry)[l.conv.turns];
-    reply.prompt().en(line).ask('zh-CN', ANSWER);
-  }
-
-  // Each reply must use the term; the scene only moves on when it does.
-  async #stepConversation(reply, course, session, l, entry, intent) {
-    if (intent.type === 'forgot') {
-      const { firstChar, firstSyllable } = hintFor(entry);
-      reply.en('Hint: the term starts with').zh(firstChar, firstSyllable ? { show: `${firstChar} (${firstSyllable})` } : {});
-      this.#repeatPrompt(reply, session);
-      return;
-    }
-    const royText = bestCandidate(intent.heard, entry);
-    const used = saidMandarin(royText, entry);
-    if (!l.conv.scripted) {
-      try {
-        const result = await this.ai.rolePlay({
-          entry, known: this.#known(course), role: 'the other people in the scene',
-          roySide: session.state.roySide, history: l.conv.history, royText,
-        });
-        l.conv.history = result.history;
-        l.conv.turns += 1;
-        if (result.roy_used_term || used) l.conv.used += 1;
-        else if (l.conv.turns <= 2) l.mistakes += 1;
-        const finished = result.finished || l.conv.turns >= MAX_AI_TURNS;
-        if (finished && l.conv.used > 0) {
-          for (const line of result.lines) reply.say.push({ lang: line.lang, text: line.text });
-          this.#completeEntry(reply, course, session);
-          return;
-        }
-        if (finished) {
-          // The scene ended without Roy using the term: one scripted line that needs it.
-          for (const line of result.lines) reply.say.push({ lang: line.lang, text: line.text });
-          reply.en('Before we finish, you need to use the term in the scene.');
-          Object.assign(l.conv, { scripted: true, turns: CONVERSATION_TURNS - 1 });
-          this.#scriptedTurn(reply, session, entry);
-          return;
-        }
-        reply.prompt();
-        for (const line of result.lines) reply.say.push({ lang: line.lang, text: line.text });
-        reply.ask('zh-CN', ANSWER);
-        return;
-      } catch (err) {
-        console.error('role-play failed, using the scripted scene:', err.message);
-        l.conv.scripted = true;
-      }
-    }
-    if (!used) {
-      l.mistakes += 1;
-      const heardVerb = intent.heard.source === 'voice' ? 'I heard' : 'You typed';
-      reply.en(royText ? `${heardVerb} "${royText}". Remember to use the term:` : 'Remember to use the term:');
-      reply.zh(entry.mandarin, { show: withPinyin(entry) });
-      reply.en('Try that line again.');
-      this.#scriptedTurn(reply, session, entry);
-      return;
-    }
-    reply.en('Good, you used').zh(entry.mandarin);
-    l.conv.turns += 1;
-    if (l.conv.turns < CONVERSATION_TURNS) this.#scriptedTurn(reply, session, entry);
-    else this.#completeEntry(reply, course, session);
-  }
-
-  // ---------- completion and jumps ----------
-
-  #completeEntry(reply, course, session) {
+  #completeEntry(course, session) {
     const s = session.state;
     const l = s.lesson;
     const entry = store.entryById(this.db, l.entryId);
     const ep = store.getEntryProgress(this.db, this.userId, entry.id);
-    const weak = l.mistakes >= 2;
+    const weak = l.mistakes >= 2 || l.struggles >= 2;
     const nowIso = this.now().toISOString();
     if (weak && !session.weak_words.includes(entry.id)) session.weak_words.push(entry.id);
 
@@ -750,8 +481,7 @@ export class Tutor {
         weak: weak ? 1 : ep.weak,
       });
       if (!session.words_reviewed.includes(entry.id)) session.words_reviewed.push(entry.id);
-      reply.en(`Nice work on ${entry.english}.`);
-      this.#returnFromJump(reply, course, session);
+      this.#returnFromJump(course, session);
       return;
     }
 
@@ -759,7 +489,7 @@ export class Tutor {
       completed: 1,
       times_practiced: ep.times_practiced + 1,
       last_reviewed: nowIso,
-      confidence: Math.max(1, 5 - l.mistakes),
+      confidence: Math.max(1, 5 - l.mistakes - Math.floor(l.struggles / 2)),
       weak: weak ? 1 : 0,
     });
     if (!session.words_studied.includes(entry.id)) session.words_studied.push(entry.id);
@@ -767,45 +497,50 @@ export class Tutor {
     if (progress.current_position === entry.position) {
       store.updateProgress(this.db, this.userId, course.id, { current_position: entry.position + 1 });
     }
-    reply.en(`Word ${entry.position} complete.`);
-    this.#resumeCurriculum(reply, course, session, store.getProgress(this.db, this.userId, course.id));
+    this.#resumeCurriculum(course, session);
   }
 
-  #jump(reply, course, session, progress, target) {
-    const s = session.state;
-    const entry = findEntry(store.allEntries(this.db, course.id), target);
-    if (!entry) {
-      reply.en(`I couldn't find "${target}" in ${course.title}, so we'll stay where we are.`);
-      this.#repeatPrompt(reply, session);
-      return;
-    }
-    const onCurrent = s.lesson && !s.lesson.jump && s.lesson.entryId === entry.id;
-    if (onCurrent) {
-      reply.en("That's the word we're on now. Let's start it again.");
-      this.#startLesson(reply, course, session, entry, false);
-      return;
-    }
-    if (!s.lesson?.jump) {
-      s.suspended = { stage: s.stage, lesson: s.lesson, review: s.review, lastPrompt: s.lastPrompt };
-    }
-    s.stage = 'new';
-    s.review = null;
-    reply.en(`Okay, a quick jump to ${entry.english}. Your place in the curriculum stays at word ${progress.current_position}.`);
-    this.#startLesson(reply, course, session, entry, true);
-  }
-
-  #returnFromJump(reply, course, session) {
+  #returnFromJump(course, session) {
     const s = session.state;
     const saved = s.suspended;
     s.suspended = null;
     if (!saved || (!saved.lesson && saved.stage !== 'review')) {
-      reply.en('Back to the curriculum.');
-      this.#resumeCurriculum(reply, course, session, store.getProgress(this.db, this.userId, course.id));
+      this.#resumeCurriculum(course, session);
       return;
     }
-    Object.assign(s, { stage: saved.stage, lesson: saved.lesson, review: saved.review, lastPrompt: saved.lastPrompt });
-    const entry = this.#currentEntry(session);
-    reply.en(entry && saved.stage !== 'review' ? `Back to the curriculum, word ${entry.position}: ${entry.english}.` : 'Back to the review.');
-    this.#repeatPrompt(reply, session);
+    Object.assign(s, { stage: saved.stage, lesson: saved.lesson, review: saved.review });
   }
+}
+
+function newLesson(entryId, jump) {
+  return { entryId, exercise: 'pronounce', passed: {}, attempts: 0, mistakes: 0, struggles: 0, jump };
+}
+
+function wordRecognitionReport(entry, heard) {
+  const r = checkWordRecognition(entry, heard);
+  return {
+    what_this_is: 'Whether the speech recogniser wrote down the expected characters. Not a pronunciation or tone score.',
+    expected: entry.mandarin,
+    recogniser_top_result: r.heard,
+    result: {
+      correct: 'the top result contains the expected term',
+      close: 'the expected term appears only among the alternatives, or as pinyin letters',
+      partial: 'some of the expected characters were recognised',
+      incorrect: 'the expected characters were not recognised',
+    }[r.verdict],
+    characters_not_recognised: r.missing,
+  };
+}
+
+function toSegments(speech) {
+  return (speech ?? []).map((line) => ({
+    lang: line.lang === 'zh' ? 'zh' : 'en',
+    text: line.text,
+    ...(line.show ? { show: line.show } : {}),
+    ...(line.slow ? { rate: 0.6 } : {}),
+  }));
+}
+
+function speechText(speech) {
+  return (speech ?? []).map((line) => line.show || line.text).join(' ');
 }

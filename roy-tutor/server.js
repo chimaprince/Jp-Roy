@@ -1,10 +1,11 @@
 import http from 'node:http';
+import Anthropic from '@anthropic-ai/sdk';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openDb } from './src/db.js';
 import { loadConfiguredCourses } from './src/curriculum.js';
-import { createAi } from './src/ai.js';
+import { createTeacher } from './src/teacher.js';
 import { Tutor } from './src/tutor.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -19,9 +20,10 @@ for (const r of loadConfiguredCourses(db, path.join(here, 'data'))) {
   console.log(`Curriculum ${r.course}: ${r.count} entries`);
   r.warnings.forEach((w) => console.warn(`  note: ${w}`));
 }
-const ai = createAi();
-console.log(ai.enabled ? 'Claude is on for sentence checks and role-play.' : 'No ANTHROPIC_API_KEY: using the built-in checks and scripted role-play.');
-const tutor = new Tutor({ db, ai, userId: process.env.TUTOR_USER_ID || 'roy', userName: process.env.TUTOR_USER_NAME || 'Roy' });
+const teacher = createTeacher();
+if (teacher.configured) console.log(`AI teacher: ${teacher.model}`);
+else console.error('CONFIGURATION ERROR: ANTHROPIC_API_KEY is not set. The tutor will not run lessons until it is set on the server.');
+const tutor = new Tutor({ db, teacher, userId: process.env.TUTOR_USER_ID || 'roy', userName: process.env.TUTOR_USER_NAME || 'Roy' });
 
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml' };
 const SECURITY_HEADERS = {
@@ -65,6 +67,7 @@ const routes = {
     source: body.source === 'voice' ? 'voice' : 'text',
     alternatives: Array.isArray(body.alternatives) ? body.alternatives.slice(0, 5).map((a) => String(a).slice(0, 500)) : [],
     confidence: Number.isFinite(body.confidence) ? body.confidence : null,
+    language: typeof body.language === 'string' ? body.language.slice(0, 20) : null,
   }),
   'POST /api/session/end': () => tutor.end(),
 };
@@ -78,6 +81,11 @@ http.createServer(async (req, res) => {
     send(res, 200, await serial(() => route(body)));
   } catch (err) {
     console.error(err);
-    send(res, err.status || 500, { error: err.status ? err.message : 'Something went wrong' });
+    if (err.code === 'ai_not_configured') return send(res, 503, { error: err.message, code: err.code });
+    if (err instanceof Anthropic.APIError) {
+      // Do not pass the provider's error text to the browser; the server log has it.
+      return send(res, 502, { error: `The AI teacher request failed (status ${err.status ?? 'none'}). Check the server's API key and connection.`, code: 'ai_request_failed' });
+    }
+    send(res, err.status === 413 ? 413 : 500, { error: err.status === 413 ? err.message : 'Something went wrong', code: null });
   }
 }).listen(PORT, () => console.log(`Roy Medical Chinese tutor on http://localhost:${PORT}`));

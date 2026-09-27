@@ -22,83 +22,90 @@ in (Mandarin or English).
 
 | Variable | Purpose |
 |---|---|
-| `ANTHROPIC_API_KEY` | Optional. Turns on Claude for sentence checking and role-play. Without it, built-in checks and scripted scenes are used. |
+| `ANTHROPIC_API_KEY` | **Required.** The AI teacher runs on the server with this key. Without it, lessons do not start and the page shows a configuration error; there is no scripted fallback. |
 | `TUTOR_MODEL` | Claude model, default `claude-opus-5`. |
 | `TUTOR_ACCESS_CODE` | Optional passcode. The browser asks for it once. Set it when the app is on the internet. |
 | `TUTOR_TIMEZONE` | Roy's time zone (for example `Asia/Shanghai`), used to decide when a new study day starts. |
 | `TUTOR_DB` | SQLite file path, default `roy-tutor/tutor.db`. |
 | `PORT` | Default `3000`. |
 
-The API key is only read by the server (`src/ai.js`). The browser never sees it.
+The API key is only read by the server (`src/teacher.js`). The browser never sees it.
+
+## How the tutor works
+
+The **tutor engine** (`src/tutor.js`) owns the lesson state and the rules that
+must always hold: curriculum order, the exercises for each word (say it,
+explain its meaning, use it in a sentence, role-play), when a word counts as
+complete, the daily review, jumps that keep Roy's place, and progress in the
+database.
+
+The **AI teacher** (`src/teacher.js`, Claude, server side) owns the
+conversation. On every turn it receives the current entry (English, Mandarin,
+pinyin with tones, source meaning), recent and weak words, the lesson state,
+this session's conversation, and what Roy said, including the recogniser's
+language, alternatives and confidence. It decides what Roy meant (an answer,
+"I don't know", a hint request, a question, "did I pronounce that right?",
+"let's continue", a role-play request, a jump, stop...), whether his answer
+shows understanding, and replies naturally. It returns structured lesson state
+(`intent`, `understood`, `correct`, `needs_retry`, `exercise_complete`,
+`next_action`, `student_confidence`) together with the spoken reply. The engine
+applies that decision, and an exercise only completes on an actual answer.
 
 ## Answering by voice
 
 Tap **🎙 START TALKING**. The tutor speaks, the microphone opens, Roy answers,
-and the tutor replies. It then listens again, without Roy tapping anything. The badge under the button
-shows the state: IDLE → TEACHER RESPONSE → LISTENING → PROCESSING →
-TEACHER RESPONSE → LISTENING AGAIN. Tapping the button while the tutor is
-speaking skips to answering, and tapping it while listening pauses.
+and the tutor replies, then listens again. The badge under the button shows the
+state: IDLE → TEACHER RESPONSE → LISTENING → PROCESSING → TEACHER RESPONSE →
+LISTENING AGAIN.
 
-The browser's speech recogniser turns speech into text (with up to five
-guesses and a confidence score) and the server evaluates it in one of two modes:
+The lesson state sets the recognition language: Mandarin for saying the term,
+sentences, role-play and review; English for explaining the meaning. The
+status line shows the language in use while listening. Chrome gets
+`cmn-Hans-CN`; other browsers get `zh-CN`.
 
-- **Pronunciation** (saying the Mandarin term, and review questions). The tutor
-  checks whether the recogniser heard the expected characters, first in its top
-  guess and then in its other guesses, and names the syllables it did not hear.
-  With `ANTHROPIC_API_KEY` set, Claude looks at the characters the recogniser
-  wrote instead (for example 应 for 硬) and says which tone or sound probably
-  slipped.
-  **Limit:** this is a check of what the recogniser heard, not an acoustic
-  tone score. The browser does not give the server any audio, so tones can
-  only be inferred. The tutor tells Roy this the first time it corrects him.
-- **Answer / conversation** (meaning, sentence, role-play). With Claude on,
-  any natural answer that shows the meaning is accepted. Without it, the
-  built-in check accepts the English term or most of the key words of the JH
-  Medics meaning, so while an entry's meaning is missing only the English term
-  itself is accepted.
+**Word recognition vs pronunciation.** The browser's speech recogniser gives
+text, not audio. The server reports to the teacher whether the recogniser wrote
+down the expected characters (`src/recognition.js`). That is word recognition,
+not a pronunciation or tone score, and the teacher is told never to judge tones
+from it. `assessPronunciation()` in `src/recognition.js` is the hook for real
+audio-based scoring later; today it returns nothing, and the teacher says it
+can't reliably judge tones yet.
 
-Each exercise repeats, with more help each time, until Roy gets it right. A word is
-only marked complete after all four exercises are passed. "Jump to" and "Stop"
-still work at any time.
-
-Typing (the "type instead" box) works as a fallback. Typed Mandarin is
-checked for the right word, but it can't check pronunciation.
+Typing (the "type instead" box) is a fallback. Typed answers go to the same AI
+teacher, marked as typed, and no pronunciation is claimed for them.
 
 ## What Roy can say
 
-| Roy says | Tutor does |
-|---|---|
-| "Let's continue" | Resumes from the saved position (and ends a side trip). |
-| "I don't understand" | Explains the current term again from the curriculum. |
-| "I forgot" | Gives a hint, lets him try again, then gives the answer. |
-| "Repeat" | Says the last question again. |
-| "Jump to *word* / go to word 12" | Side trip to that entry. His curriculum position does not change. |
-| "Back to the curriculum" | Ends the side trip. |
-| "I'll be the doctor" / "You are the patient" | Sets his role-play role (Doctor, Patient, Interpreter, Nurse, Hospital staff). |
-| "Stop" / "That's all for today" | Saves a session summary and ends. |
-
-Chinese forms (继续, 我忘了, 我不懂, 再说一遍, 结束) work too.
+Anything natural: answers in his own words, "I don't know", "I forgot",
+"give me a hint", "can you explain that again?", "why is it called that?",
+"did I pronounce that correctly?", "let's practise it again", "can we role-play
+this?", "I'll be the nurse", "let's continue", "go to word 12", "that's all for
+today". The AI teacher works out what he means; jumps can only go to curriculum
+entries and never change his saved place.
 
 ## How a study day runs
 
 1. Load progress.
 2. On a new day: "Welcome back, Roy. Yesterday we studied …", then review those
-   words plus up to 5 weak words. Wrong answers are corrected, marked weak and
-   asked again once.
-3. After review, carry on with the next unfinished entry:
-   English → Mandarin → pinyin → JH Medics meaning → Roy says it → recognition
-   test → Roy's own sentence → short role-play → mark complete → next entry.
+   words plus up to 5 weak words. A missed word is marked weak and asked again
+   once.
+3. After review, carry on with the next unfinished entry: the teacher
+   introduces English, Mandarin, pinyin with tones and the JH Medics meaning,
+   then works through saying it, explaining it, a sentence, and a short
+   role-play. The word is complete when all four are done; then the next entry.
 
-An entry is marked weak if Roy made two or more mistakes on it.
+An entry is marked weak if Roy gave two or more wrong answers or needed help
+twice on it.
 
 ## Layout
 
 ```
 server.js              HTTP server and JSON API
-src/tutor.js           tutor logic: review, lesson steps, jumps, role-play, progress
-src/intents.js         spoken command detection
-src/match.js           answer checking (characters or toneless pinyin)
-src/ai.js              Claude calls (server side only)
+src/tutor.js           tutor engine: lesson state, order, review, jumps, progress
+src/teacher.js         the AI teacher (Claude, server side only)
+src/recognition.js     word recognition from the transcript; pronunciation hook
+src/intents.js         resolves a jump target to a curriculum entry
+src/match.js           text normalisation helpers
 src/db.js              SQLite schema and queries
 src/curriculum.js      curriculum validation and import
 data/                  curriculum files (see data/README.md)

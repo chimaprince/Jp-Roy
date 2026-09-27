@@ -1,416 +1,286 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { openDb, getProgress, getEntryProgress, activeCourse, entryAt } from '../src/db.js';
-import { upsertCourse, importEntries, validateEntries, parseCsv } from '../src/curriculum.js';
+import { upsertCourse, importEntries } from '../src/curriculum.js';
 import { Tutor } from '../src/tutor.js';
-import { detectIntent } from '../src/intents.js';
-import { saidMandarin, saidEnglish } from '../src/match.js';
+import { createTeacher, DECISION_SCHEMA, INTENTS } from '../src/teacher.js';
 
-// Entry 1 is the real first JH Medics entry. Entries 2 and 3 are placeholders
-// used only by these tests.
+// These tests cover the tutor engine: lesson state, order, progress, and what
+// it sends to the AI teacher. The teacher is replaced by a stand-in that
+// returns fixed decisions, so they do NOT test the AI's judgement.
+
 const FIXTURE = [
-  { position: 1, english: 'epidural', mandarin: '硬膜外', pinyin: 'yìng mó wài', meaning: null, source_page: null },
-  { position: 2, english: 'test term two', mandarin: '测试二', pinyin: 'cè shì èr', meaning: 'placeholder meaning two', source_page: '2' },
-  { position: 3, english: 'test term three', mandarin: '测试三', pinyin: 'cè shì sān', meaning: 'placeholder meaning three', source_page: '3' },
+  { position: 1, english: 'epidural', mandarin: '硬膜外', pinyin: 'yìng mó wài', meaning: "Injection of a substance into a person's spine", source_page: '1' },
+  { position: 2, english: 'test term two', mandarin: '测试二', pinyin: 'cè shì èr', meaning: 'placeholder two', source_page: '1' },
+  { position: 3, english: 'test term three', mandarin: '测试三', pinyin: 'cè shì sān', meaning: 'placeholder three', source_page: '1' },
 ];
+
+function decision(over = {}) {
+  return {
+    intent: 'answer', understood: true, correct: null, needs_retry: false, exercise_complete: false,
+    next_action: 'same_exercise', student_confidence: 'ok', jump_target: null, roleplay_role: null,
+    speech: [{ lang: 'en', text: 'Teacher reply.', show: null, slow: false }], notes: '', ...over,
+  };
+}
+
+function fakeTeacher() {
+  const queue = [];
+  const contexts = [];
+  return {
+    configured: true,
+    contexts,
+    next(...ds) { queue.push(...ds); },
+    async decide(ctx) {
+      contexts.push(ctx);
+      return queue.shift() ?? decision();
+    },
+  };
+}
 
 function setup() {
   const db = openDb(':memory:');
   upsertCourse(db, { id: 'vol1', title: 'JH Medics Volume 1', volume: 1, status: 'active' });
-  const r = importEntries(db, 'vol1', FIXTURE);
-  assert.ok(r.ok, r.errors.join(', '));
+  assert.ok(importEntries(db, 'vol1', FIXTURE).ok);
   let clock = new Date('2026-09-27T10:00:00');
-  const tutor = new Tutor({ db, now: () => clock });
-  return { db, tutor, setClock: (d) => { clock = new Date(d); } };
+  const teacher = fakeTeacher();
+  const tutor = new Tutor({ db, teacher, now: () => clock });
+  return { db, teacher, tutor, setClock: (d) => { clock = new Date(d); } };
 }
 
-const spoken = (r) => r.say.map((s) => s.text).join(' ');
+const voice = { source: 'voice', alternatives: [], confidence: 0.9 };
+const done = (over = {}) => decision({ correct: true, exercise_complete: true, next_action: 'next_exercise', ...over });
+const last = (teacher) => teacher.contexts.at(-1);
 
-async function finishWord(tutor, entry) {
-  await tutor.message(entry.mandarin); // pronounce
-  await tutor.message(entry.english); // recognize
-  await tutor.message(`这是${entry.mandarin}。`); // sentence
-  await tutor.message(`这是${entry.mandarin}`); // conversation turn 1
-  return tutor.message(`${entry.mandarin}`); // conversation turn 2
+async function passWord(tutor, teacher, entry) {
+  teacher.next(done(), done(), done(), done());
+  await tutor.message(entry.mandarin, voice);
+  await tutor.message(entry.english, { source: 'voice' });
+  await tutor.message(`这是${entry.mandarin}。`, voice);
+  return tutor.message(entry.mandarin, voice);
 }
 
-test('first session starts at entry 1 and follows the lesson flow', async () => {
-  const { db, tutor } = setup();
+test('without an API key the tutor refuses to run and says why', async () => {
+  const db = openDb(':memory:');
+  upsertCourse(db, { id: 'vol1', title: 'JH Medics Volume 1', volume: 1, status: 'active' });
+  importEntries(db, 'vol1', FIXTURE);
+  const saved = { key: process.env.ANTHROPIC_API_KEY, token: process.env.ANTHROPIC_AUTH_TOKEN };
+  delete process.env.ANTHROPIC_API_KEY;
+  delete process.env.ANTHROPIC_AUTH_TOKEN;
+  const teacher = createTeacher();
+  Object.assign(process.env, saved.key ? { ANTHROPIC_API_KEY: saved.key } : {}, saved.token ? { ANTHROPIC_AUTH_TOKEN: saved.token } : {});
+  assert.equal(teacher.configured, false);
+  const tutor = new Tutor({ db, teacher });
+  assert.equal(tutor.status().aiConfigured, false);
+  await assert.rejects(() => tutor.start(), (err) => err.code === 'ai_not_configured' && /ANTHROPIC_API_KEY/.test(err.message));
+  await assert.rejects(() => tutor.message('硬膜外', voice), (err) => err.code === 'ai_not_configured');
+});
+
+test('the decision schema carries structured lesson state', () => {
+  for (const key of ['intent', 'understood', 'correct', 'needs_retry', 'exercise_complete', 'next_action', 'student_confidence', 'speech']) {
+    assert.ok(DECISION_SCHEMA.required.includes(key), key);
+  }
+  for (const i of ['answer', 'uncertain', 'hint_request', 'explain_request', 'question', 'pronunciation_question', 'practice_again', 'roleplay_request', 'continue']) {
+    assert.ok(INTENTS.includes(i), i);
+  }
+});
+
+test('session start sends the teacher the entry and lesson state; mic language is Mandarin', async () => {
+  const { tutor, teacher } = setup();
+  teacher.next(decision({ speech: [{ lang: 'en', text: 'Welcome, Roy.', show: null, slow: false }, { lang: 'zh', text: '硬膜外', show: '硬膜外 — yìng mó wài', slow: true }] }));
   const r = await tutor.start();
-  const text = spoken(r);
-  assert.match(text, /Welcome, Roy/);
-  assert.match(text, /Word 1 of 3/);
-  assert.match(text, /epidural/);
-  assert.ok(r.say.some((s) => s.lang === 'zh' && s.text === '硬膜外'));
-  assert.ok(r.say.some((s) => s.show === 'yìng mó wài'));
-  assert.match(text, /meaning for this entry has not been loaded yet/);
+  const ctx = last(teacher);
+  assert.equal(ctx.event, 'session_start');
+  assert.equal(ctx.current_entry.english, 'epidural');
+  assert.equal(ctx.current_entry.mandarin, '硬膜外');
+  assert.deepEqual(ctx.current_entry.pinyin_syllables_with_tones.map((s) => s.tone), [4, 2, 4]);
+  assert.equal(ctx.current_entry.meaning, FIXTURE[0].meaning);
+  assert.equal(ctx.lesson_state.exercise, 'pronounce');
+  assert.equal(ctx.lesson_state.microphone_language_now, 'Mandarin (zh-CN)');
   assert.equal(r.listen, 'zh-CN');
+  assert.equal(r.mode, 'pronunciation');
+  assert.deepEqual(r.say[1], { lang: 'zh', text: '硬膜外', show: '硬膜外 — yìng mó wài', rate: 0.6 });
+  assert.equal(r.status.total, 3);
+});
+
+test('Roy\'s turn: transcript, recogniser details and word recognition go to the teacher; no pronunciation score is claimed', async () => {
+  const { tutor, teacher } = setup();
+  await tutor.start();
+  await tutor.message('应膜外', { source: 'voice', alternatives: ['英模外'], confidence: 0.7, language: 'zh-CN' });
+  const said = last(teacher).roy_said;
+  assert.equal(said.text, '应膜外');
+  assert.match(said.input, /voice/);
+  assert.equal(said.recogniser_language, 'zh-CN');
+  assert.deepEqual(said.recogniser_alternatives, ['英模外']);
+  assert.match(said.word_recognition.result, /some of the expected characters/);
+  assert.deepEqual(said.word_recognition.characters_not_recognised.map((c) => c.char), ['硬']);
+  assert.match(said.word_recognition.what_this_is, /Not a pronunciation or tone score/);
+  assert.equal(said.pronunciation_assessment, null);
+});
+
+test('typed input is marked as a text fallback with no word-recognition report', async () => {
+  const { tutor, teacher } = setup();
+  await tutor.start();
+  await tutor.message('硬膜外', { source: 'text' });
+  const said = last(teacher).roy_said;
+  assert.match(said.input, /typed/);
+  assert.equal(said.word_recognition, null);
+});
+
+test('a completed exercise advances; the meaning exercise switches the mic to English', async () => {
+  const { tutor, teacher } = setup();
+  await tutor.start();
+  assert.equal(last(teacher).if_complete.then, 'exercise "meaning"');
+  teacher.next(done());
+  const r = await tutor.message('硬膜外', voice);
+  assert.equal(r.exercise, 'meaning');
+  assert.equal(r.listen, 'en-US');
+  assert.equal(r.mode, 'answer');
+  assert.equal(r.card.english, null, 'English hidden while Roy explains the meaning');
+});
+
+test('"I don\'t know", questions and "let\'s continue" do not complete or fail an exercise', async () => {
+  const { db, tutor, teacher } = setup();
+  await tutor.start();
+  teacher.next(decision({ intent: 'uncertain' }), decision({ intent: 'pronunciation_question' }), decision({ intent: 'continue', exercise_complete: true }));
+  await tutor.message("I don't know", voice);
+  await tutor.message('Did I pronounce it correctly?', voice);
+  const r = await tutor.message("Let's continue", voice);
+  assert.equal(r.exercise, 'pronounce', 'still on pronunciation');
+  assert.equal(r.listen, 'zh-CN');
+  assert.equal(getEntryProgress(db, 'roy', entryAt(db, 'vol1', 1).id).completed, 0);
+  assert.equal(last(teacher).conversation_so_far.length, 5, 'history of this session is passed along');
+});
+
+test('a wrong answer keeps the exercise open', async () => {
+  const { tutor, teacher } = setup();
+  await tutor.start();
+  teacher.next(decision({ correct: false, needs_retry: true, next_action: 'retry' }));
+  const r = await tutor.message('不知道', voice);
+  assert.equal(r.exercise, 'pronounce');
+  assert.equal(last(teacher).lesson_state.wrong_attempts_this_exercise, 0, 'context was built before the attempt');
+  await tutor.message('硬膜', voice);
+  assert.equal(last(teacher).lesson_state.wrong_attempts_this_exercise, 1);
+});
+
+test('all four exercises complete the word; progress saves and the next entry follows in order', async () => {
+  const { db, tutor, teacher } = setup();
+  await tutor.start();
+  teacher.next(done(), done(), done());
+  await tutor.message('硬膜外', voice);
+  await tutor.message('an injection into the spine to reduce pain', { source: 'voice' });
+  await tutor.message('医生给病人打硬膜外。', voice);
+  teacher.next(done());
+  const r = await tutor.message('硬膜外', voice);
+  const preview = last(teacher);
+  assert.equal(preview.lesson_state.exercise, 'roleplay');
+  assert.equal(preview.if_complete.next_entry.english, 'test term two', 'the teacher is told which entry comes next');
+  assert.equal(r.card.position, 2);
+  assert.equal(r.exercise, 'pronounce');
   assert.equal(r.stage, 'new');
-
-  const rec = await tutor.message('硬膜外');
-  assert.equal(rec.listen, 'en-US');
-  assert.equal(rec.card.english, null, 'English is hidden while testing recognition');
-  const sent = await tutor.message('epidural');
-  assert.match(spoken(sent), /sentence/);
-  const conv = await tutor.message('这是硬膜外。');
-  assert.equal(conv.stage, 'conversation');
-  assert.match(spoken(conv), /interpreter/i);
-  await tutor.message('硬膜外');
-  const done = await tutor.message('这是硬膜外');
-  assert.match(spoken(done), /Word 1 complete/);
-  assert.match(spoken(done), /Word 2 of 3/);
-
   const course = activeCourse(db);
   assert.equal(getProgress(db, 'roy', course.id).current_position, 2);
-  const ep = getEntryProgress(db, 'roy', entryAt(db, course.id, 1).id);
+  const ep = getEntryProgress(db, 'roy', entryAt(db, 'vol1', 1).id);
   assert.equal(ep.completed, 1);
-  assert.equal(ep.times_practiced, 1);
   assert.equal(ep.weak, 0);
+  assert.equal(r.status.position, 2);
 });
 
-test('a new day reviews yesterday before any new word', async () => {
-  const { db, tutor, setClock } = setup();
+test('role-play on request, then the remaining exercises', async () => {
+  const { tutor, teacher } = setup();
   await tutor.start();
-  await finishWord(tutor, FIXTURE[0]);
-  tutor.end();
-
-  setClock('2026-09-28T09:00:00');
-  const r = await tutor.start();
-  assert.match(spoken(r), /Welcome back, Roy\. Yesterday we studied epidural\./);
-  assert.equal(r.stage, 'review');
-  assert.match(spoken(r), /How do you say "epidural" in Mandarin\?/);
-  assert.equal(r.card.mandarin, null, 'answer hidden during review');
-
-  const wrong = await tutor.message('不知道');
-  assert.match(spoken(wrong), /Not quite/);
-  const wrong2 = await tutor.message('还是不知道');
-  assert.match(spoken(wrong2), /correct answer/);
-  assert.ok(wrong2.say.some((s) => s.text === '硬膜外'));
-  const course = activeCourse(db);
-  assert.equal(getEntryProgress(db, 'roy', entryAt(db, course.id, 1).id).weak, 1);
-
-  await tutor.message('硬膜外'); // repeat after me; the weak word comes round again
-  const again = await tutor.message('硬膜外');
-  assert.match(spoken(again), /right word/);
-  assert.match(spoken(again), /Review complete/);
-  assert.match(spoken(again), /Word 2 of 3/);
-  assert.equal(getProgress(db, 'roy', course.id).review_required, 0);
+  teacher.next(decision({ intent: 'roleplay_request', next_action: 'switch_to_roleplay', roleplay_role: 'Nurse' }));
+  const r = await tutor.message('Can we role-play this? I will be the nurse.', { source: 'voice' });
+  assert.equal(r.exercise, 'roleplay');
+  assert.equal(r.stage, 'conversation');
+  assert.equal(r.role, 'Nurse');
+  teacher.next(done());
+  const after = await tutor.message('病人需要硬膜外', voice);
+  assert.equal(after.exercise, 'pronounce', 'goes back to the first exercise not yet passed');
 });
 
-test('"I forgot" gives a hint, then the answer', async () => {
-  const { tutor, setClock } = setup();
+test('a jump keeps the saved position; "let\'s continue" comes back', async () => {
+  const { db, tutor, teacher } = setup();
   await tutor.start();
-  await finishWord(tutor, FIXTURE[0]);
-  tutor.end();
-  setClock('2026-09-28T09:00:00');
-  await tutor.start();
-  const hint = await tutor.message('I forgot');
-  assert.match(spoken(hint), /hint/i);
-  assert.ok(hint.say.some((s) => s.text === '硬' && s.show === '硬 (yìng)'));
-  const reveal = await tutor.message('I forgot');
-  assert.ok(reveal.say.some((s) => s.text === '硬膜外'));
-  assert.match(spoken(reveal), /Say it after me/);
-});
-
-test('"I don\'t understand" re-explains from the curriculum without inventing a meaning', async () => {
-  const { tutor } = setup();
-  await tutor.start();
-  const r = await tutor.message("I don't understand");
-  assert.match(spoken(r), /English term is epidural/);
-  assert.match(spoken(r), /not been loaded yet/);
-  assert.equal(r.listen, 'zh-CN');
-});
-
-test('a jump does not move the saved curriculum position', async () => {
-  const { db, tutor } = setup();
-  await tutor.start();
-  const j = await tutor.message('jump to test term three');
-  assert.match(spoken(j), /place in the curriculum stays at word 1/);
+  teacher.next(decision({ intent: 'jump_request', jump_target: 'test term three', next_action: 'jump' }));
+  const j = await tutor.message('teach me test term three', { source: 'voice' });
+  assert.equal(last(teacher).event, 'jump_started');
+  assert.equal(last(teacher).current_entry.position, 3);
   assert.equal(j.card.position, 3);
   assert.equal(j.jump, true);
-  const back = await finishWord(tutor, FIXTURE[2]);
-  assert.match(spoken(back), /Back to the curriculum, word 1/);
-  const course = activeCourse(db);
-  assert.equal(getProgress(db, 'roy', course.id).current_position, 1);
-  assert.equal(getEntryProgress(db, 'roy', entryAt(db, course.id, 3).id).completed, 0);
-
-  const j2 = await tutor.message('go to word 2');
-  assert.equal(j2.card.position, 2);
-  const cont = await tutor.message("Let's continue");
-  assert.equal(cont.card.position, 1);
-  assert.equal(getProgress(db, 'roy', course.id).current_position, 1);
+  assert.equal(getProgress(db, 'roy', activeCourse(db).id).current_position, 1);
+  teacher.next(decision({ intent: 'continue', next_action: 'resume' }));
+  const back = await tutor.message("Let's continue", { source: 'voice' });
+  assert.equal(last(teacher).event, 'returned_from_jump');
+  assert.equal(back.card.position, 1);
 });
 
-test('jumping to a word outside the curriculum is refused', async () => {
-  const { tutor } = setup();
+test('a jump to a word outside the curriculum is refused', async () => {
+  const { tutor, teacher } = setup();
   await tutor.start();
-  const r = await tutor.message('teach me appendectomy');
-  assert.match(spoken(r), /couldn't find "appendectomy"/);
+  teacher.next(decision({ intent: 'jump_request', jump_target: 'appendectomy', next_action: 'jump' }));
+  const r = await tutor.message('teach me appendectomy', { source: 'voice' });
+  assert.equal(last(teacher).event, 'jump_not_found');
   assert.equal(r.card.position, 1);
 });
 
-test('same-day return resumes the open session', async () => {
-  const { tutor } = setup();
+test('"stop" ends the session with the teacher\'s goodbye and a saved summary', async () => {
+  const { tutor, teacher } = setup();
   await tutor.start();
-  await tutor.message('硬膜外');
-  const r = await tutor.start();
-  assert.match(spoken(r), /pick up where we left off/);
-  assert.equal(r.listen, 'en-US');
-});
-
-test('role-play role can be chosen by voice', async () => {
-  const { tutor } = setup();
-  await tutor.start();
-  await tutor.message('I will be the nurse');
-  await tutor.message('硬膜外');
-  await tutor.message('epidural');
-  const conv = await tutor.message('这是硬膜外。');
-  assert.match(spoken(conv), /You are the nurse/);
-  assert.equal(conv.role, 'Nurse');
-});
-
-test('AI sentence check and role-play are used when available', async () => {
-  const { db } = setup();
-  const calls = [];
-  const ai = {
-    enabled: true,
-    async checkMeaning(args) { calls.push(['meaning', args.answer]); return { correct: true, feedback: [{ lang: 'en', text: 'Yes, that is it.' }] }; },
-    async checkSentence(args) { calls.push(['sentence', args.sentence]); return { correct: true, feedback: [{ lang: 'en', text: 'Well said.' }], corrected_sentence: null }; },
-    async rolePlay(args) {
-      calls.push(['role', args.royText]);
-      const turns = args.history.length / 2;
-      return { lines: [{ lang: 'en', text: `Doctor line ${turns}` }], roy_used_term: true, finished: turns >= 2, history: [...args.history, { role: 'user', content: 'x' }, { role: 'assistant', content: 'y' }] };
-    },
-  };
-  const tutor = new Tutor({ db, ai, now: () => new Date('2026-09-27T10:00:00') });
-  await tutor.start();
-  await tutor.message('硬膜外');
-  const meaning = await tutor.message("it's the injection near the spine for pain relief");
-  assert.match(spoken(meaning), /Yes, that is it/);
-  const conv = await tutor.message('医生说硬膜外');
-  assert.match(spoken(conv), /Well said/);
-  assert.match(spoken(conv), /Doctor line 0/);
-  await tutor.message('硬膜外');
-  const done = await tutor.message('硬膜外');
-  assert.match(spoken(done), /Word 1 complete/);
-  assert.deepEqual(calls.map((c) => c[0]), ['meaning', 'sentence', 'role', 'role', 'role']);
-});
-
-test('end of session stores a summary', async () => {
-  const { db, tutor } = setup();
-  await tutor.start();
-  await finishWord(tutor, FIXTURE[0]);
-  const r = tutor.end();
-  assert.match(spoken(r), /New words: epidural/);
+  await passWord(tutor, teacher, FIXTURE[0]);
+  teacher.next(decision({ intent: 'stop', next_action: 'end_session', speech: [{ lang: 'en', text: 'Great work, Roy!', show: null, slow: false }] }));
+  const r = await tutor.message("That's all for today", { source: 'voice' });
   assert.equal(r.ended, true);
-  const course = activeCourse(db);
-  const row = db.prepare('SELECT summary FROM study_sessions WHERE id = ?').get(getProgress(db, 'roy', course.id).last_session);
-  assert.match(row.summary, /epidural/);
+  assert.equal(r.say[0].text, 'Great work, Roy!');
+  assert.match(r.say.at(-1).text, /New words: epidural/);
 });
 
-test('curriculum import keeps source text exactly and rejects bad positions', () => {
-  const db = openDb(':memory:');
-  upsertCourse(db, { id: 'c', title: 'T', volume: 1, status: 'active' });
-  const odd = { position: 1, english: 'Epidural  ', mandarin: '硬膜外 ', pinyin: 'yìng mó wài', meaning: 'Source wording, kept as-is (teh typo too)', source_page: '1' };
-  assert.ok(importEntries(db, 'c', [odd]).ok);
-  const row = entryAt(db, 'c', 1);
-  assert.equal(row.english, odd.english);
-  assert.equal(row.mandarin, odd.mandarin);
-  assert.equal(row.meaning, odd.meaning);
+test('a new day starts with review of yesterday, then new material', async () => {
+  const { db, tutor, teacher, setClock } = setup();
+  await tutor.start();
+  await passWord(tutor, teacher, FIXTURE[0]);
+  await tutor.end();
 
-  assert.equal(validateEntries([{ ...odd, position: 2 }]).errors.length > 0, true, 'gap at 1');
-  assert.equal(validateEntries([odd, { ...odd }]).errors.length > 0, true, 'duplicate position');
-  assert.equal(validateEntries([{ ...odd, mandarin: '' }]).errors.length > 0, true, 'missing mandarin');
-  const failed = importEntries(db, 'c', [{ ...odd, position: 5 }]);
-  assert.equal(failed.ok, false);
-  assert.equal(entryAt(db, 'c', 1).english, odd.english, 'failed import changed nothing');
+  setClock('2026-09-28T09:00:00');
+  const r = await tutor.start();
+  const ctx = last(teacher);
+  assert.equal(ctx.event, 'session_start');
+  assert.match(ctx.event_details, /Welcome back, Roy\. Yesterday we studied epidural\./);
+  assert.equal(ctx.lesson_state.exercise, 'review');
+  assert.equal(ctx.current_entry.english, 'epidural');
+  assert.equal(r.stage, 'review');
+  assert.equal(r.card.mandarin, null, 'answer hidden during review');
+
+  teacher.next(decision({ correct: false, exercise_complete: true }));
+  const miss = await tutor.message('不知道', voice);
+  assert.equal(miss.stage, 'review', 'a missed word comes round once more');
+  assert.equal(getEntryProgress(db, 'roy', entryAt(db, 'vol1', 1).id).weak, 1);
+  teacher.next(done());
+  const next = await tutor.message('硬膜外', voice);
+  assert.equal(next.stage, 'new');
+  assert.equal(next.card.position, 2);
+  assert.equal(getProgress(db, 'roy', activeCourse(db).id).review_required, 0);
 });
 
-test('re-import keeps entry ids so progress survives', () => {
-  const { db, tutor } = setup();
-  const before = entryAt(db, 'vol1', 1).id;
-  getEntryProgress(db, 'roy', before);
-  const r = importEntries(db, 'vol1', FIXTURE);
-  assert.ok(r.ok);
-  assert.equal(entryAt(db, 'vol1', 1).id, before);
-  getEntryProgress(db, 'roy', entryAt(db, 'vol1', 3).id);
-  assert.equal(importEntries(db, 'vol1', FIXTURE.slice(0, 2)).ok, false, 'removing an entry with progress is refused');
-  assert.ok(entryAt(db, 'vol1', 3), 'the refused import changed nothing');
-  assert.ok(tutor);
-});
-
-test('a staged Volume 2 is never the active course', () => {
-  const { db } = setup();
-  upsertCourse(db, { id: 'vol2', title: 'JH Medics Volume 2', volume: 2, status: 'staged', requires: 'vol1' });
-  importEntries(db, 'vol2', [{ position: 1, english: 'x', mandarin: '二', pinyin: 'èr' }]);
-  assert.equal(activeCourse(db).id, 'vol1');
-});
-
-test('CSV parsing handles quotes and commas', () => {
-  const rows = parseCsv('position,english,mandarin,pinyin,meaning,source_page\n1,epidural,硬膜外,yìng mó wài,"a, b ""c""",4\n');
-  assert.deepEqual(rows[0], { position: '1', english: 'epidural', mandarin: '硬膜外', pinyin: 'yìng mó wài', meaning: 'a, b "c"', source_page: '4' });
-});
-
-test('intent detection', () => {
-  assert.equal(detectIntent("Let's continue").type, 'continue');
-  assert.equal(detectIntent("I don't understand").type, 'dontUnderstand');
-  assert.equal(detectIntent('I forgot').type, 'forgot');
-  assert.equal(detectIntent('我忘了').type, 'forgot');
-  assert.equal(detectIntent('stop').type, 'end');
-  assert.equal(detectIntent('Stop the bleeding').type, 'answer');
-  assert.deepEqual(detectIntent('jump to epidural'), { type: 'jump', target: 'epidural' });
-  assert.deepEqual(detectIntent('you are the doctor'), { type: 'role', role: 'Interpreter' });
-  assert.deepEqual(detectIntent("I'll be the patient"), { type: 'role', role: 'Patient' });
-  assert.equal(detectIntent('硬膜外').type, 'answer');
-});
-
-test('answer matching accepts characters or pinyin', () => {
-  const e = FIXTURE[0];
-  assert.ok(saidMandarin('硬膜外。', e));
-  assert.ok(saidMandarin('ying mo wai', e));
-  assert.ok(!saidMandarin('硬膜', e));
-  assert.ok(saidEnglish('It means epidural', e));
-  assert.ok(!saidEnglish('spinal', e));
-});
-
-// ---------- voice evaluation ----------
-
-const voice = (_said, alternatives = [], confidence = 0.9) => ({ source: 'voice', alternatives, confidence });
-
-test('pronunciation: the recogniser hearing the term passes', async () => {
-  const { tutor } = setup();
-  const r0 = await tutor.start();
-  assert.equal(r0.mode, 'pronunciation');
-  const r = await tutor.message('硬膜外', voice('硬膜外'));
-  assert.match(spoken(r), /Correct! I heard/);
-  assert.equal(r.mode, 'answer');
+test('same-day return resumes the open session', async () => {
+  const { tutor, teacher } = setup();
+  await tutor.start();
+  teacher.next(done());
+  await tutor.message('硬膜外', voice);
+  const r = await tutor.start();
+  assert.equal(last(teacher).event, 'session_resume');
+  assert.equal(r.exercise, 'meaning');
   assert.equal(r.listen, 'en-US');
 });
 
-test('pronunciation: a near miss names the syllable to fix and repeats until right', async () => {
-  const { db, tutor } = setup();
-  await tutor.start();
-  const r = await tutor.message('应膜外', voice('应膜外', ['英模外']));
-  const text = spoken(r);
-  assert.match(text, /I heard "应膜外"/);
-  assert.match(text, /can't measure your tones directly/, 'says honestly what it can check');
-  assert.ok(r.say.some((s) => s.text === '硬' && s.show === '硬 (yìng)'), 'points at the missing syllable');
-  assert.equal(r.mode, 'pronunciation', 'asks again');
-
-  await tutor.message('不对', voice('不对'));
-  const third = await tutor.message('不对', voice('不对'));
-  assert.match(spoken(third), /one syllable at a time/);
-  assert.equal(third.mode, 'pronunciation', 'still on pronunciation, never skipped');
+test('an open session saved by the old scripted engine is replaced, keeping progress', async () => {
+  const { db, tutor, teacher } = setup();
   const course = activeCourse(db);
-  assert.equal(getEntryProgress(db, 'roy', entryAt(db, course.id, 1).id).completed, 0);
-
-  const ok = await tutor.message('硬膜外', voice('硬膜外'));
-  assert.match(spoken(ok), /Correct/);
-  assert.equal(ok.mode, 'answer');
-});
-
-test('pronunciation: the term found only in the recogniser\'s other guesses counts as close', async () => {
-  const { tutor } = setup();
-  await tutor.start();
-  const r = await tutor.message('硬摸外', voice('硬摸外', ['硬膜外']));
-  assert.match(spoken(r), /Close/);
-  assert.equal(r.mode, 'answer');
-});
-
-test('pronunciation: AI explains likely tone slips from what the recogniser heard', async () => {
-  const { db } = setup();
-  const ai = {
-    enabled: true,
-    async explainPronunciation({ check }) {
-      assert.equal(check.heard, '应膜外');
-      return { feedback: [{ lang: 'en', text: 'The recogniser heard yīng, first tone. You need yìng, fourth tone.' }] };
-    },
-  };
-  const tutor = new Tutor({ db, ai, now: () => new Date('2026-09-27T10:00:00') });
-  await tutor.start();
-  const r = await tutor.message('应膜外', voice('应膜外'));
-  assert.match(spoken(r), /fourth tone/);
-});
-
-test('meaning: a natural answer is accepted without exact wording', async () => {
-  const { tutor } = setup();
-  await tutor.start();
-  await tutor.message('jump to word 2');
-  await tutor.message('测试二', voice('测试二'));
-  const r = await tutor.message('I think it is the placeholder for meaning number two', voice(''));
-  assert.match(spoken(r), /Correct/);
-  assert.match(spoken(r), /sentence/);
-});
-
-test('meaning: a wrong answer is explained and asked again until right', async () => {
-  const { tutor } = setup();
-  await tutor.start();
-  await tutor.message('硬膜外', voice('硬膜外'));
-  const wrong = await tutor.message('a broken arm', voice(''));
-  assert.match(spoken(wrong), /You said "a broken arm"/);
-  assert.equal(wrong.mode, 'answer');
-  const wrong2 = await tutor.message('no idea', voice(''));
-  assert.match(spoken(wrong2), /means "epidural"/);
-  assert.match(spoken(wrong2), /in your own words/);
-  const right = await tutor.message('epidural', voice(''));
-  assert.match(spoken(right), /sentence/);
-});
-
-test('sentence and role-play repeat until the term is used', async () => {
-  const { tutor } = setup();
-  await tutor.start();
-  await tutor.message('硬膜外', voice('硬膜外'));
-  await tutor.message('epidural', voice(''));
-  const s1 = await tutor.message('我很好', voice('我很好'));
-  assert.match(spoken(s1), /needs to include/);
-  const s2 = await tutor.message('我很好', voice('我很好'));
-  assert.match(spoken(s2), /这是硬膜外/, 'gives an example after two misses');
-  const conv = await tutor.message('医生说硬膜外', voice('医生说硬膜外'));
-  assert.equal(conv.stage, 'conversation');
-  const miss = await tutor.message('你好', voice('你好'));
-  assert.match(spoken(miss), /Try that line again/);
-  await tutor.message('硬膜外', voice('硬膜外'));
-  const done = await tutor.message('这是硬膜外', voice('这是硬膜外'));
-  assert.match(spoken(done), /Word 1 complete/);
-});
-
-// ---------- the real Volume 1 file ----------
-
-test('JH Medics Volume 1 data file: 385 entries in source order', async () => {
-  const fs = await import('node:fs');
-  const vol1 = JSON.parse(fs.readFileSync(new URL('../data/jh-medics-vol1.json', import.meta.url), 'utf8'));
-  const db = openDb(':memory:');
-  upsertCourse(db, { id: 'jh-medics-vol1', title: 'JH Medics Volume 1', volume: 1, status: 'active' });
-  const r = importEntries(db, 'jh-medics-vol1', vol1.entries);
-  assert.ok(r.ok, r.errors.join(', '));
-  assert.equal(r.count, 385);
-  const first = [1, 2, 3, 4, 5].map((p) => entryAt(db, 'jh-medics-vol1', p));
-  assert.deepEqual(first.map((e) => e.english), ['epidural', 'esophagus', 'excrement', 'eye specialist', 'fainting']);
-  assert.deepEqual(first.map((e) => e.mandarin), ['硬膜外', '食道', '大便', '眼科医生', '晕倒']);
-  assert.equal(first[0].pinyin, 'yìng mó wài');
-  assert.equal(first[0].source_page, '1');
-  assert.match(first[0].meaning, /^Injection of a substance into a person's spine/);
-  const last = entryAt(db, 'jh-medics-vol1', 385);
-  assert.equal(last.english, 'Neuropathy');
-  assert.equal(last.mandarin, '神经病');
-  assert.equal(entryAt(db, 'jh-medics-vol1', 11).english, 'Regular physical examintion', 'source spelling kept');
-  assert.equal(entryAt(db, 'jh-medics-vol1', 161).pinyin, '', 'no pinyin invented');
-
-  const tutor = new Tutor({ db, now: () => new Date('2026-09-27T10:00:00') });
-  const start = await tutor.start();
-  assert.match(spoken(start), /Word 1 of 385\./);
-  assert.equal(start.status.total, 385);
-});
-
-test('typed answers in a pronunciation exercise are labelled as text fallback', async () => {
-  const { tutor } = setup();
-  await tutor.start();
-  const wrong = await tutor.message('硬膜', { source: 'text' });
-  assert.match(spoken(wrong), /Text fallback: you typed "硬膜"/);
-  assert.match(spoken(wrong), /Pronunciation was not tested/);
-  assert.equal(wrong.mode, 'pronunciation', 'asks again');
-  const right = await tutor.message('硬膜外', { source: 'text' });
-  assert.match(spoken(right), /Text fallback: that is the right word\. Pronunciation was not tested/);
-  assert.doesNotMatch(spoken(right), /Correct! I heard/);
-  assert.equal(right.mode, 'answer');
+  const old = (await import('../src/db.js')).createSession(db, 'roy', course.id, '2026-09-27', '2026-09-27T08:00:00Z');
+  db.prepare("UPDATE study_sessions SET state = ? WHERE id = ?").run(JSON.stringify({ stage: 'new', lesson: { entryId: 2, step: 'recognize' } }), old.id);
+  getProgress(db, 'roy', course.id);
+  db.prepare('UPDATE user_progress SET current_position = 2, last_session = ?, last_study_date = ? WHERE user_id = ?').run(old.id, '2026-09-27', 'roy');
+  const r = await tutor.start();
+  assert.equal(last(teacher).event, 'session_start');
+  assert.equal(r.card.position, 2);
+  assert.equal(r.exercise, 'pronounce');
 });

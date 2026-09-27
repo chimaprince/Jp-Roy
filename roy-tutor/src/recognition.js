@@ -1,16 +1,18 @@
-import { normZh, tonelessPinyin, normEn, englishForms } from './match.js';
+import { normZh, tonelessPinyin } from './match.js';
 
-// Pronunciation check, first version.
+// Two separate things, kept separate on purpose:
 //
-// The browser's speech recogniser gives us text, not audio, so this cannot
-// score tones or sounds directly. What it can do:
-//   - check whether the recogniser heard the expected characters (its top
-//     result, then its other guesses),
-//   - find which characters it did and did not hear, so the tutor can say
-//     which syllable needs work.
-// When the recogniser hears a different character with a similar sound, that
-// usually points to a tone or sound slip; the AI tutor (if enabled) explains
-// those substitutions, and says it is inferring from text.
+// A. WORD RECOGNITION (available now). The browser's speech recogniser returns
+//    text, not audio. checkWordRecognition() reports whether that text contains
+//    the expected Mandarin characters, and which characters it did not contain.
+//    This says what the recogniser understood. It is not a pronunciation score
+//    and says nothing reliable about tones.
+//
+// B. PRONUNCIATION ASSESSMENT (not available yet). Judging tones and sounds
+//    needs the audio itself. assessPronunciation() is the hook for that: when an
+//    audio-analysis service is added, the browser will send the recording and
+//    this function will return per-syllable results. Until then it returns null,
+//    and the teacher is told that no pronunciation assessment exists.
 
 const SPEECH = 'voice';
 
@@ -48,7 +50,7 @@ export function syllablesFor(entry) {
  *             typed: boolean, missing: {char: string, syllable: string|null}[], via: string|null,
  *             lowConfidence: boolean }}
  */
-export function checkPronunciation(entry, heard) {
+export function checkWordRecognition(entry, heard) {
   const text = String(heard.text ?? '');
   const typed = heard.source !== SPEECH;
   const candidates = [text, ...(heard.alternatives ?? [])].filter(Boolean);
@@ -87,23 +89,19 @@ export function checkPronunciation(entry, heard) {
   return { ...base, verdict, passed: false, missing, via: best?.candidate ?? null };
 }
 
-const STOP = new Set(['the', 'and', 'for', 'with', 'that', 'this', 'from', 'into', 'which', 'what', 'means', 'mean', 'meaning', 'its', 'are', 'was', 'used', 'when', 'your', 'you', 'it\'s', 'thing', 'kind']);
+const TONE_MARKS = {
+  1: /[āēīōūǖĀĒĪŌŪǕ]/, 2: /[áéíóúǘÁÉÍÓÚǗ]/, 3: /[ǎěǐǒǔǚǍĚǏǑǓǙ]/, 4: /[àèìòùǜÀÈÌÒÙǛ]/,
+};
 
-function contentWords(s) {
-  return normEn(s).trim().split(' ').filter((w) => w.length > 2 && !STOP.has(w));
+// Syllables of the source pinyin with their tone numbers (5 = neutral), for teaching.
+export function syllablesWithTones(entry) {
+  return String(entry.pinyin || '')
+    .split(/[\s/,()（）-]+/)
+    .filter((syl) => /\p{L}/u.test(syl))
+    .map((syl) => ({ syllable: syl, tone: Number(Object.keys(TONE_MARKS).find((t) => TONE_MARKS[t].test(syl)) ?? 5) }));
 }
 
-// Built-in meaning check, used when the AI tutor is off or fails.
-// Accepts the English term (or one of its forms), or an answer that covers
-// most of the key words of the source meaning.
-export function checkMeaningLocally(entry, answer) {
-  const heard = normEn(answer);
-  if (englishForms(entry.english).some((f) => heard.includes(f))) return { correct: true, reason: 'term' };
-  if (entry.meaning) {
-    const key = [...new Set(contentWords(entry.meaning))];
-    const said = new Set(contentWords(answer));
-    const hits = key.filter((w) => said.has(w) || [...said].some((s) => s.length > 4 && (w.startsWith(s) || s.startsWith(w))));
-    if (key.length && hits.length / key.length >= 0.5) return { correct: true, reason: 'meaning' };
-  }
-  return { correct: false, reason: null };
+// Hook for real pronunciation scoring from audio (see B above). Not implemented.
+export async function assessPronunciation(/* { entry, audio } */) {
+  return null;
 }

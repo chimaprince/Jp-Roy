@@ -74,10 +74,21 @@ function showHeard(text, final = false) {
   heardEl.textContent = text ? `${final ? 'You said' : 'Hearing'}: “${text}”` : '';
 }
 
+const LANGUAGE_LABEL = { 'zh-CN': 'Mandarin', 'en-US': 'English' };
+
 function listeningHint() {
-  if (mode === 'pronunciation') return 'Say the Mandarin term. Checking what the speech recogniser hears.';
-  if (listenLang?.startsWith('zh')) return 'Answer in Mandarin.';
-  return 'Answer in English, in your own words.';
+  const heardAs = `Listening in ${LANGUAGE_LABEL[listenLang] ?? listenLang} (${recognitionLang(listenLang)}).`;
+  if (mode === 'pronunciation') return `${heardAs} Say the Mandarin term.`;
+  if (listenLang?.startsWith('zh')) return `${heardAs} Answer in Mandarin.`;
+  return `${heardAs} Answer in English, in your own words.`;
+}
+
+// The server says which language the answer should be in. Chrome's recogniser
+// lists Mandarin as cmn-Hans-CN; other browsers take zh-CN.
+function recognitionLang(lang) {
+  const isChrome = navigator.userAgentData?.brands?.some((b) => b.brand === 'Google Chrome')
+    || (/Chrome\//.test(navigator.userAgent) && !/Edg\//.test(navigator.userAgent));
+  return lang === 'zh-CN' && isChrome ? 'cmn-Hans-CN' : lang;
 }
 
 function addLog(who, text) {
@@ -170,7 +181,7 @@ function listen() {
   }
   const again = turnsHeard > 0;
   recognizer = new Recognition();
-  recognizer.lang = listenLang;
+  recognizer.lang = recognitionLang(listenLang);
   recognizer.continuous = false;
   recognizer.interimResults = true;
   recognizer.maxAlternatives = 5;
@@ -213,7 +224,7 @@ function listen() {
       silentRetries = 0;
       turnsHeard += 1;
       showHeard(text, true);
-      send(text, { source: 'voice', alternatives, confidence });
+      send(text, { source: 'voice', alternatives, confidence, language: listenLang });
       return;
     }
     silentRetries += 1;
@@ -320,4 +331,10 @@ $('type-form').addEventListener('submit', (e) => {
 
 if ('speechSynthesis' in window) speechSynthesis.getVoices();
 setState('idle');
-api('GET', '/api/status').then((s) => { renderStatus(s); if (s.session) renderView(s.session); }).catch(() => {});
+api('GET', '/api/status').then((s) => {
+  renderStatus(s);
+  if (s.session) renderView(s.session);
+  if (s.aiConfigured === false) {
+    setStatus('Setup needed: the AI teacher is not configured on the server (ANTHROPIC_API_KEY is missing). Lessons cannot start until it is set.');
+  }
+}).catch(() => {});
