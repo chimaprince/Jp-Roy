@@ -63,15 +63,14 @@ test('without an API key the tutor refuses to run and says why', async () => {
   const db = openDb(':memory:');
   upsertCourse(db, { id: 'vol1', title: 'JH Medics Volume 1', volume: 1, status: 'active' });
   importEntries(db, 'vol1', FIXTURE);
-  const saved = { key: process.env.ANTHROPIC_API_KEY, token: process.env.ANTHROPIC_AUTH_TOKEN };
-  delete process.env.ANTHROPIC_API_KEY;
-  delete process.env.ANTHROPIC_AUTH_TOKEN;
+  const saved = process.env.OPENAI_API_KEY;
+  delete process.env.OPENAI_API_KEY;
   const teacher = createTeacher();
-  Object.assign(process.env, saved.key ? { ANTHROPIC_API_KEY: saved.key } : {}, saved.token ? { ANTHROPIC_AUTH_TOKEN: saved.token } : {});
+  if (saved) process.env.OPENAI_API_KEY = saved;
   assert.equal(teacher.configured, false);
   const tutor = new Tutor({ db, teacher });
   assert.equal(tutor.status().aiConfigured, false);
-  await assert.rejects(() => tutor.start(), (err) => err.code === 'ai_not_configured' && /ANTHROPIC_API_KEY/.test(err.message));
+  await assert.rejects(() => tutor.start(), (err) => err.code === 'ai_not_configured' && /OPENAI_API_KEY/.test(err.message));
   await assert.rejects(() => tutor.message('硬膜外', voice), (err) => err.code === 'ai_not_configured');
 });
 
@@ -283,4 +282,23 @@ test('an open session saved by the old scripted engine is replaced, keeping prog
   assert.equal(last(teacher).event, 'session_start');
   assert.equal(r.card.position, 2);
   assert.equal(r.exercise, 'pronounce');
+});
+
+test('the teacher calls OpenAI chat completions with the lesson context and a strict JSON schema', async () => {
+  let sent;
+  const client = { chat: { completions: { create: async (params) => {
+    sent = params;
+    return { id: 'chatcmpl_test', model: params.model, usage: { total_tokens: 1 }, choices: [{ finish_reason: 'stop', message: { refusal: null, content: JSON.stringify(decision({ intent: 'uncertain' })) } }] };
+  } } } };
+  const quiet = { log() {} };
+  const teacher = createTeacher({ client, log: quiet });
+  const out = await teacher.decide({ event: 'student_turn', lesson_state: { exercise: 'pronounce' }, current_entry: { english: 'epidural' }, roy_said: { text: "I don't know this word." } });
+  assert.equal(out.intent, 'uncertain');
+  assert.equal(teacher.provider, 'openai');
+  assert.equal(sent.response_format.type, 'json_schema');
+  assert.equal(sent.response_format.json_schema.strict, true);
+  assert.equal(sent.messages[0].role, 'system');
+  assert.match(sent.messages[0].content, /JH Medics Volume 1/);
+  assert.match(sent.messages[1].content, /I don't know this word/);
+  assert.match(sent.messages[1].content, /epidural/);
 });

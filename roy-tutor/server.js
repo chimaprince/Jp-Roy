@@ -1,5 +1,5 @@
 import http from 'node:http';
-import Anthropic from '@anthropic-ai/sdk';
+import OpenAI from 'openai';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -21,8 +21,8 @@ for (const r of loadConfiguredCourses(db, path.join(here, 'data'))) {
   r.warnings.forEach((w) => console.warn(`  note: ${w}`));
 }
 const teacher = createTeacher();
-if (teacher.configured) console.log(`AI teacher: ${teacher.model}`);
-else console.error('CONFIGURATION ERROR: ANTHROPIC_API_KEY is not set. The tutor will not run lessons until it is set on the server.');
+if (teacher.configured) console.log(`AI teacher: OpenAI, model ${teacher.model} (key from OPENAI_API_KEY)`);
+else console.error('CONFIGURATION ERROR: OPENAI_API_KEY is not set. The tutor will not run lessons until it is set in the server environment.');
 const tutor = new Tutor({ db, teacher, userId: process.env.TUTOR_USER_ID || 'roy', userName: process.env.TUTOR_USER_NAME || 'Roy' });
 
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml' };
@@ -82,7 +82,7 @@ http.createServer(async (req, res) => {
   } catch (err) {
     console.error(err);
     if (err.code === 'ai_not_configured') return send(res, 503, { error: err.message, code: err.code });
-    if (err instanceof Anthropic.APIError) {
+    if (err instanceof OpenAI.APIError) {
       // Do not pass the provider's error text to the browser; the server log has it.
       return send(res, 502, { error: `The AI teacher request failed (status ${err.status ?? 'none'}). Check the server's API key and connection.`, code: 'ai_request_failed' });
     }

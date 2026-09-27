@@ -1,19 +1,20 @@
-import Anthropic from '@anthropic-ai/sdk';
+import OpenAI from 'openai';
 
-// The AI teacher. Server side only: the API key is read from the environment
-// by the SDK and never reaches the browser.
+// The AI teacher. Server side only: OPENAI_API_KEY is read from the server's
+// environment here and never reaches the browser.
 //
 // The tutor engine (tutor.js) owns the lesson state (curriculum position,
 // current exercise, review queue, progress). Each turn it hands the teacher a
-// full description of that state plus what Roy just said; the teacher decides
-// what Roy meant, whether it shows understanding, and what to say next, and
-// returns that as structured lesson state plus natural speech.
+// full description of that state plus what Roy just said; the teacher (an
+// OpenAI model) decides what Roy meant, whether it shows understanding, and
+// what to say next, and returns that as structured lesson state plus speech.
 
-const MODEL = process.env.TUTOR_MODEL || 'claude-opus-5';
+const MODEL = process.env.OPENAI_MODEL || 'gpt-5.5';
+const REASONING_EFFORT = process.env.OPENAI_REASONING_EFFORT || 'low';
 
 export class TeacherNotConfigured extends Error {
   constructor() {
-    super('The AI teacher is not configured: set ANTHROPIC_API_KEY on the server and restart it.');
+    super('The AI teacher is not configured: set OPENAI_API_KEY in the server environment and restart the server.');
     this.status = 503;
     this.code = 'ai_not_configured';
   }
@@ -101,28 +102,36 @@ SPEAKING STYLE
 - zh lines: Chinese characters only, so the Mandarin voice reads them. To show pinyin, put the characters in text and "characters — pinyin" in show. Never put pinyin or Chinese inside an en line's text except in show.
 - Always end with one clear question or instruction for Roy that matches the listening language in the lesson state (Mandarin or English), unless the session is ending.`;
 
-export function createTeacher({ client } = {}) {
-  const hasCredentials = Boolean(process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN);
-  if (!client && !hasCredentials) {
-    return { configured: false, async decide() { throw new TeacherNotConfigured(); } };
+export function createTeacher({ client, log = console } = {}) {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!client && !apiKey) {
+    return { configured: false, provider: 'openai', model: MODEL, async decide() { throw new TeacherNotConfigured(); } };
   }
-  const anthropic = client ?? new Anthropic();
+  const openai = client ?? new OpenAI({ apiKey });
   return {
     configured: true,
+    provider: 'openai',
     model: MODEL,
     async decide(context) {
-      const response = await anthropic.beta.messages.create({
+      const started = Date.now();
+      log.log(`[teacher] -> OpenAI chat.completions model=${MODEL} event=${context.event} exercise=${context.lesson_state?.exercise} roy="${context.roy_said?.text ?? ''}"`);
+      const completion = await openai.chat.completions.create({
         model: MODEL,
-        max_tokens: 4000,
-        betas: ['server-side-fallback-2026-07-01'],
-        fallbacks: 'default',
-        output_config: { effort: 'low', format: { type: 'json_schema', schema: DECISION_SCHEMA } },
-        system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
-        messages: [{ role: 'user', content: JSON.stringify(context, null, 1) }],
+        reasoning_effort: REASONING_EFFORT,
+        max_completion_tokens: 4000,
+        response_format: { type: 'json_schema', json_schema: { name: 'teacher_decision', strict: true, schema: DECISION_SCHEMA } },
+        messages: [
+          { role: 'system', content: SYSTEM_PROMPT },
+          { role: 'user', content: JSON.stringify(context, null, 1) },
+        ],
       });
-      if (response.stop_reason === 'refusal') throw new Error('The AI teacher declined this request.');
-      const text = response.content.filter((b) => b.type === 'text').map((b) => b.text).join('');
-      return JSON.parse(text);
+      const choice = completion.choices[0];
+      log.log(`[teacher] <- OpenAI id=${completion.id} model=${completion.model} finish=${choice.finish_reason} ${Date.now() - started}ms tokens=${completion.usage?.total_tokens ?? '?'}`);
+      if (choice.message.refusal) throw new Error(`The AI teacher refused: ${choice.message.refusal}`);
+      if (choice.finish_reason === 'length') throw new Error('The AI teacher reply was cut off (max_completion_tokens).');
+      const decision = JSON.parse(choice.message.content);
+      log.log(`[teacher]    intent=${decision.intent} correct=${decision.correct} exercise_complete=${decision.exercise_complete} next=${decision.next_action}`);
+      return decision;
     },
   };
 }

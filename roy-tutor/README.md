@@ -22,8 +22,9 @@ in (Mandarin or English).
 
 | Variable | Purpose |
 |---|---|
-| `ANTHROPIC_API_KEY` | **Required.** The AI teacher runs on the server with this key. Without it, lessons do not start and the page shows a configuration error; there is no scripted fallback. |
-| `TUTOR_MODEL` | Claude model, default `claude-opus-5`. |
+| `OPENAI_API_KEY` | **Required.** The AI teacher calls OpenAI from the server with this key. Without it, lessons do not start and the page shows a configuration error; there is no scripted fallback. |
+| `OPENAI_MODEL` | OpenAI model for the teacher, default `gpt-5.5`. |
+| `OPENAI_REASONING_EFFORT` | Default `low` (faster replies for voice). |
 | `TUTOR_ACCESS_CODE` | Optional passcode. The browser asks for it once. Set it when the app is on the internet. |
 | `TUTOR_TIMEZONE` | Roy's time zone (for example `Asia/Shanghai`), used to decide when a new study day starts. |
 | `TUTOR_DB` | SQLite file path, default `roy-tutor/tutor.db`. |
@@ -39,7 +40,7 @@ explain its meaning, use it in a sentence, role-play), when a word counts as
 complete, the daily review, jumps that keep Roy's place, and progress in the
 database.
 
-The **AI teacher** (`src/teacher.js`, Claude, server side) owns the
+The **AI teacher** (`src/teacher.js`, OpenAI, server side) owns the
 conversation. On every turn it receives the current entry (English, Mandarin,
 pinyin with tones, source meaning), recent and weak words, the lesson state,
 this session's conversation, and what Roy said, including the recogniser's
@@ -102,7 +103,7 @@ twice on it.
 ```
 server.js              HTTP server and JSON API
 src/tutor.js           tutor engine: lesson state, order, review, jumps, progress
-src/teacher.js         the AI teacher (Claude, server side only)
+src/teacher.js         the AI teacher (OpenAI, server side only)
 src/recognition.js     word recognition from the transcript; pronunciation hook
 src/intents.js         resolves a jump target to a curriculum entry
 src/match.js           text normalisation helpers
