@@ -10,7 +10,8 @@
   "scripts": {
     "start": "node --disable-warning=ExperimentalWarning server.js",
     "import": "node --disable-warning=ExperimentalWarning scripts/import-curriculum.js",
-    "test": "node --disable-warning=ExperimentalWarning --test test/*.test.js"
+    "test": "node --disable-warning=ExperimentalWarning --test test/*.test.js",
+    "check-openai": "node --disable-warning=ExperimentalWarning scripts/check-openai.mjs"
   },
   "dependencies": {
     "openai": "^7.23.0"
