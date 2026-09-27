@@ -1,0 +1,17 @@
+{
+  "course": {
+    "id": "jh-medics-vol1",
+    "title": "JH Medics Volume 1",
+    "volume": 1
+  },
+  "entries": [
+    {
+      "position": 1,
+      "english": "epidural",
+      "mandarin": "硬膜外",
+      "pinyin": "yìng mó wài",
+      "meaning": null,
+      "source_page": null
+    }
+  ]
+}

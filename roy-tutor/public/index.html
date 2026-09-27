@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Roy Medical Chinese</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main class="app">
+    <header>
+      <h1>ROY MEDICAL CHINESE</h1>
+      <p class="course" id="course">JH MEDICS VOLUME 1</p>
+      <p class="progress" id="progress">Progress: Word – of –</p>
+    </header>
+
+    <section class="today" aria-label="Today's plan">
+      <span class="label">Today:</span>
+      <ol id="stages">
+        <li data-stage="review">Review</li>
+        <li data-stage="new">New Words</li>
+        <li data-stage="conversation">Conversation</li>
+      </ol>
+    </section>
+
+    <button id="talk" class="talk" type="button" aria-pressed="false">🎙 START TALKING</button>
+    <p class="status" id="status" aria-live="polite">Press the button and the tutor will start.</p>
+
+    <section class="card" id="card" hidden aria-live="polite">
+      <p class="position" id="card-position"></p>
+      <p class="mandarin" id="card-mandarin" lang="zh-CN"></p>
+      <p class="pinyin" id="card-pinyin"></p>
+      <p class="english" id="card-english"></p>
+      <p class="meaning" id="card-meaning"></p>
+      <p class="tag" id="card-tag" hidden></p>
+    </section>
+
+    <section class="quick" aria-label="Quick commands">
+      <button type="button" data-say="Repeat">Repeat</button>
+      <button type="button" data-say="I forgot">I forgot</button>
+      <button type="button" data-say="I don't understand">I don't understand</button>
+      <button type="button" data-say="Let's continue">Let's continue</button>
+      <button type="button" data-say="Stop">End session</button>
+    </section>
+
+    <section class="log" id="log" aria-label="Conversation"></section>
+
+    <details class="type-instead">
+      <summary>No microphone? Type instead</summary>
+      <form id="type-form">
+        <input id="type-input" autocomplete="off" placeholder="Type your answer">
+        <button type="submit">Send</button>
+      </form>
+    </details>
+  </main>
+  <script src="/app.js" type="module"></script>
+</body>
+</html>

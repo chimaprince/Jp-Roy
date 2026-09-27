@@ -1,0 +1,16 @@
+{
+  "name": "roy-medical-chinese-tutor",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Voice-first medical Chinese tutor for Roy, driven by the JH Medics Volume 1 curriculum.",
+  "type": "module",
+  "engines": { "node": ">=22.5" },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning server.js",
+    "import": "node --disable-warning=ExperimentalWarning scripts/import-curriculum.js",
+    "test": "node --disable-warning=ExperimentalWarning --test test/*.test.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.128.0"
+  }
+}

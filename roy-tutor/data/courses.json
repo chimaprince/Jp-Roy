@@ -1,0 +1,11 @@
+{
+  "courses": [
+    {
+      "id": "jh-medics-vol1",
+      "title": "JH Medics Volume 1",
+      "volume": 1,
+      "status": "active",
+      "file": "jh-medics-vol1.json"
+    }
+  ]
+}
