@@ -1,6 +1,6 @@
 {
   "name": "roy-medical-chinese-tutor",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Voice-first medical Chinese tutor for Roy, driven by the JH Medics Volume 1 curriculum.",
   "type": "module",

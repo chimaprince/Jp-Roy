@@ -1,4 +1,4 @@
-import { envFile, envKeysFromFile } from './src/env.js'; // must stay the first import
+import { envFile, envKeysFromFile, envProblems } from './src/env.js'; // must stay the first import
 import http from 'node:http';
 import OpenAI from 'openai';
 import fs from 'node:fs';
@@ -21,11 +21,19 @@ for (const r of loadConfiguredCourses(db, path.join(here, 'data'))) {
   console.log(`Curriculum ${r.course}: ${r.count} entries`);
   r.warnings.forEach((w) => console.warn(`  note: ${w}`));
 }
-console.log(envFile ? `Environment file: ${path.relative(process.cwd(), envFile) || envFile} (set: ${envKeysFromFile.join(', ') || 'nothing new'})` : 'Environment file: none found (roy-tutor/.env or repository root .env)');
-console.log(`OPENAI_API_KEY: ${process.env.OPENAI_API_KEY ? 'set (value not shown)' : 'NOT SET'}`);
+const pkg = JSON.parse(fs.readFileSync(path.join(here, 'package.json'), 'utf8'));
+console.log(`Roy Medical Chinese tutor ${pkg.version} | AI provider: OpenAI (the only provider)`);
+console.log(envFile ? `Environment file: ${envFile}` : 'Environment file: none found (looked for roy-tutor/.env and the repository root .env)');
+envProblems.forEach((p) => console.error(`  ${p}`));
+if (envFile && !envKeysFromFile.includes('OPENAI_API_KEY') && !process.env.OPENAI_API_KEY) console.error('  the file has no OPENAI_API_KEY= line');
 const teacher = createTeacher();
-if (teacher.configured) console.log(`AI teacher: OpenAI, model ${teacher.model}`);
-else console.error('CONFIGURATION ERROR: OPENAI_API_KEY is not set. The tutor will not run lessons until it is set in the server environment.');
+if (teacher.configured) {
+  console.log(`OPENAI_API_KEY: detected (value hidden)${envKeysFromFile.includes('OPENAI_API_KEY') ? ' from the .env file' : ' from the shell environment'}`);
+  console.log(`OpenAI client: initialized, model ${teacher.model}`);
+} else {
+  console.error('OPENAI_API_KEY is not configured.');
+  console.error('  The tutor will not run lessons until it is set. There is no scripted fallback.');
+}
 const tutor = new Tutor({ db, teacher, userId: process.env.TUTOR_USER_ID || 'roy', userName: process.env.TUTOR_USER_NAME || 'Roy' });
 
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml' };

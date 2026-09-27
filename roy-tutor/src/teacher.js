@@ -12,7 +12,7 @@ import OpenAI from 'openai';
 
 export class TeacherNotConfigured extends Error {
   constructor() {
-    super('The AI teacher is not configured: set OPENAI_API_KEY in the server environment and restart the server.');
+    super('OPENAI_API_KEY is not configured.');
     this.status = 503;
     this.code = 'ai_not_configured';
   }
