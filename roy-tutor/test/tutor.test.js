@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { openDb, getProgress, getEntryProgress, activeCourse, entryAt } from '../src/db.js';
 import { upsertCourse, importEntries } from '../src/curriculum.js';
 import { Tutor } from '../src/tutor.js';
-import { createTeacher, providerSettings, checkDecision, DECISION_SCHEMA, INTENTS } from '../src/teacher.js';
+import { createTeacher, qwenSettings, checkDecision, DECISION_SCHEMA, INTENTS, QWEN_DEFAULT_MODEL, QWEN_DEFAULT_BASE_URL } from '../src/teacher.js';
 
 // These tests cover the tutor engine: lesson state, order, progress, and what
 // it sends to the AI teacher. The teacher is replaced by a stand-in that
@@ -59,7 +59,7 @@ async function passWord(tutor, teacher, entry) {
   return tutor.message(entry.mandarin, voice);
 }
 
-test('without an API key the tutor refuses to run and says why', async () => {
+test('without DASHSCOPE_API_KEY the tutor refuses to run and says Qwen is not configured', async () => {
   const db = openDb(':memory:');
   upsertCourse(db, { id: 'vol1', title: 'JH Medics Volume 1', volume: 1, status: 'active' });
   importEntries(db, 'vol1', FIXTURE);
@@ -67,7 +67,7 @@ test('without an API key the tutor refuses to run and says why', async () => {
   assert.equal(teacher.configured, false);
   const tutor = new Tutor({ db, teacher });
   assert.equal(tutor.status().aiConfigured, false);
-  await assert.rejects(() => tutor.start(), (err) => err.code === 'ai_not_configured' && err.message === 'QWEN_API_KEY is not configured.');
+  await assert.rejects(() => tutor.start(), (err) => err.code === 'ai_not_configured' && err.message === 'Qwen is not configured: DASHSCOPE_API_KEY is missing.');
   await assert.rejects(() => tutor.message('硬膜外', voice), (err) => err.code === 'ai_not_configured');
 });
 
@@ -281,63 +281,54 @@ test('an open session saved by the old scripted engine is replaced, keeping prog
   assert.equal(r.exercise, 'pronounce');
 });
 
-test('the teacher calls OpenAI chat completions with the lesson context and a strict JSON schema', async () => {
-  let sent;
-  const client = { chat: { completions: { create: async (params) => {
-    sent = params;
-    return { id: 'chatcmpl_test', model: params.model, usage: { total_tokens: 1 }, choices: [{ finish_reason: 'stop', message: { refusal: null, content: JSON.stringify(decision({ intent: 'uncertain' })) } }] };
-  } } } };
-  const quiet = { log() {} };
-  const teacher = createTeacher({ client, log: quiet, env: { AI_PROVIDER: 'openai' } });
-  const out = await teacher.decide({ event: 'student_turn', lesson_state: { exercise: 'pronounce' }, current_entry: { english: 'epidural' }, roy_said: { text: "I don't know this word." } });
-  assert.equal(out.intent, 'uncertain');
-  assert.equal(teacher.provider, 'openai');
-  assert.equal(sent.max_completion_tokens, 4000);
-  assert.equal(sent.response_format.type, 'json_schema');
-  assert.equal(sent.response_format.json_schema.strict, true);
-  assert.equal(sent.messages[0].role, 'system');
-  assert.match(sent.messages[0].content, /JH Medics Volume 1/);
-  assert.match(sent.messages[1].content, /I don't know this word/);
-  assert.match(sent.messages[1].content, /epidural/);
+test('Qwen is the only provider: DASHSCOPE_API_KEY, QWEN_MODEL and QWEN_BASE_URL from the environment', () => {
+  const defaults = qwenSettings({});
+  assert.equal(defaults.label, 'Qwen');
+  assert.equal(defaults.keyName, 'DASHSCOPE_API_KEY');
+  assert.equal(defaults.apiKey, '');
+  assert.equal(defaults.model, 'qwen3.8-flash');
+  assert.equal(QWEN_DEFAULT_MODEL, 'qwen3.8-flash');
+  assert.equal(defaults.baseURL, 'https://ws-c2mgxehx4ud1bn7.cn-beijing.maas.aliyuncs.com/compatible-mode/v1');
+  assert.equal(QWEN_DEFAULT_BASE_URL, defaults.baseURL);
+  assert.equal(defaults.enableThinking, false);
+  const custom = qwenSettings({ DASHSCOPE_API_KEY: 'k', QWEN_MODEL: 'qwen-plus', QWEN_BASE_URL: 'https://example.test/compatible-mode/v1' });
+  assert.equal(custom.apiKey, 'k');
+  assert.equal(custom.model, 'qwen-plus');
+  assert.equal(custom.baseURL, 'https://example.test/compatible-mode/v1');
+  assert.equal(qwenSettings({ OPENAI_API_KEY: 'k' }).apiKey, '', 'an OpenAI key is not used');
+  const t = createTeacher({ env: {} });
+  assert.equal(t.configured, false);
+  assert.equal(t.provider, 'qwen');
+  assert.equal(t.model, 'qwen3.8-flash');
 });
 
-test('provider selection: Qwen is primary, OpenAI still available, AI_PROVIDER decides', () => {
-  assert.equal(providerSettings({}).name, 'qwen');
-  assert.equal(providerSettings({ QWEN_API_KEY: 'k' }).name, 'qwen');
-  assert.equal(providerSettings({ OPENAI_API_KEY: 'k' }).name, 'openai', 'only an OpenAI key: use OpenAI');
-  assert.equal(providerSettings({ QWEN_API_KEY: 'k', OPENAI_API_KEY: 'k' }).name, 'qwen', 'both keys: Qwen first');
-  assert.equal(providerSettings({ AI_PROVIDER: 'openai', QWEN_API_KEY: 'k', OPENAI_API_KEY: 'k' }).name, 'openai');
-  const q = providerSettings({ DASHSCOPE_API_KEY: 'k', QWEN_MODEL: 'qwen-max', QWEN_BASE_URL: 'https://dashscope.aliyuncs.com/compatible-mode/v1' });
-  assert.equal(q.keyName, 'DASHSCOPE_API_KEY');
-  assert.equal(q.model, 'qwen-max');
-  assert.equal(q.baseURL, 'https://dashscope.aliyuncs.com/compatible-mode/v1');
-  assert.equal(providerSettings({ QWEN_API_KEY: 'k' }).baseURL, 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1');
-  assert.throws(() => providerSettings({ AI_PROVIDER: 'other' }), /qwen" or "openai/);
-  assert.equal(createTeacher({ env: { AI_PROVIDER: 'openai' } }).keyName, 'OPENAI_API_KEY');
-});
-
-test('Qwen: JSON mode with the schema in the prompt; a reply that misses the schema is retried once', async () => {
+test('Qwen request: JSON mode, schema in the prompt, max_tokens, thinking off; a reply that misses the schema is retried once', async () => {
   const calls = [];
   const replies = [JSON.stringify({ intent: 'answer' }), JSON.stringify(decision({ intent: 'uncertain' }))];
   const client = { chat: { completions: { create: async (params) => {
     calls.push(params);
     return { id: `q${calls.length}`, model: params.model, choices: [{ finish_reason: 'stop', message: { content: replies.shift() } }] };
   } } } };
-  const teacher = createTeacher({ client, log: { log() {}, warn() {} }, env: { AI_PROVIDER: 'qwen', QWEN_MODEL: 'qwen-plus' } });
-  const out = await teacher.decide({ event: 'student_turn', roy_said: { text: "I don't know this word." } });
+  const teacher = createTeacher({ client, log: { log() {}, warn() {} }, env: {} });
+  const out = await teacher.decide({ event: 'student_turn', current_entry: { english: 'epidural' }, roy_said: { text: "I don't know this word." } });
   assert.equal(out.intent, 'uncertain');
   assert.equal(calls.length, 2);
+  assert.equal(calls[0].model, 'qwen3.8-flash');
   assert.deepEqual(calls[0].response_format, { type: 'json_object' });
   assert.equal(calls[0].max_tokens, 4000);
+  assert.equal(calls[0].enable_thinking, false);
   assert.equal(calls[0].reasoning_effort, undefined);
-  assert.equal(calls[0].model, 'qwen-plus');
+  assert.equal(calls[0].messages[0].role, 'system');
+  assert.match(calls[0].messages[0].content, /JH Medics Volume 1/);
   assert.match(calls[0].messages[0].content, /OUTPUT FORMAT[\s\S]*"exercise_complete"/);
+  assert.match(calls[0].messages[1].content, /I don't know this word/);
+  assert.match(calls[0].messages[1].content, /epidural/);
   assert.match(calls[1].messages.at(-1).content, /did not match the required JSON schema/);
 });
 
 test('Qwen: a reply that still misses the schema is an error, not a scripted answer', async () => {
-  const client = { chat: { completions: { create: async () => ({ id: 'x', model: 'qwen-plus', choices: [{ finish_reason: 'stop', message: { content: '{"intent":"answer"}' } }] }) } } };
-  const teacher = createTeacher({ client, log: { log() {}, warn() {} }, env: { AI_PROVIDER: 'qwen' } });
+  const client = { chat: { completions: { create: async () => ({ id: 'x', model: 'qwen3.8-flash', choices: [{ finish_reason: 'stop', message: { content: '{"intent":"answer"}' } }] }) } } };
+  const teacher = createTeacher({ client, log: { log() {}, warn() {} }, env: {} });
   await assert.rejects(() => teacher.decide({ event: 'student_turn' }), /did not match the lesson schema/);
   assert.deepEqual(checkDecision(decision()), []);
   assert.ok(checkDecision({ ...decision(), intent: 'dance' }).some((p) => /intent must be one of/.test(p)));

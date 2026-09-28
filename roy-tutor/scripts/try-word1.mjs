@@ -1,5 +1,4 @@
-// Runs a real Word 1 conversation against the configured AI provider (Qwen or
-// OpenAI) and prints it. Uses the real curriculum, tutor engine and teacher, with
+// Runs a real Word 1 conversation with the Qwen teacher and prints it. Uses the real curriculum, tutor engine and teacher, with
 // a throwaway in-memory database, so saved progress is not touched.
 //   npm run try-word1
 import '../src/env.js';
@@ -27,7 +26,7 @@ const TURNS = [
 const teacher = createTeacher();
 console.log(`AI provider: ${teacher.label}, model ${teacher.model}, endpoint ${teacher.baseURL}`);
 if (!teacher.configured) {
-  console.error(`${teacher.keyName} is not configured.`);
+  console.error('Qwen is not configured: DASHSCOPE_API_KEY is missing.');
   process.exit(1);
 }
 

@@ -1,5 +1,4 @@
-// Connectivity check for the configured AI provider (Qwen or OpenAI), from the
-// same Node and .env the server uses.
+// Connectivity check for the Qwen API, from the same Node and .env the server uses.
 //   npm run check-ai
 // Tests each layer on its own (DNS, TCP, TLS, HTTPS, API key, model) and prints
 // which problem it is. Never prints the API key.
@@ -7,10 +6,10 @@ import '../src/env.js';
 import dns from 'node:dns/promises';
 import net from 'node:net';
 import tls from 'node:tls';
-import { providerSettings } from '../src/teacher.js';
+import { qwenSettings } from '../src/teacher.js';
 
-const P = providerSettings();
-const BASE = (P.baseURL || 'https://api.openai.com/v1').replace(/\/$/, '');
+const P = qwenSettings();
+const BASE = P.baseURL.replace(/\/$/, '');
 const HOST = new URL(BASE).hostname;
 const KEY = P.apiKey;
 const MODEL = P.model;
@@ -44,7 +43,7 @@ async function main() {
   const verdicts = [];
   console.log('Environment');
   line(null, `Node ${process.version} on ${process.platform}`);
-  line(null, 'AI provider', `${P.label} (AI_PROVIDER=${process.env.AI_PROVIDER || 'not set'}), endpoint ${BASE}`);
+  line(null, 'AI provider', `Qwen, endpoint ${BASE}`);
   line(Boolean(KEY), P.keyName, KEY ? `set, ${KEY.length} characters, ${KEY.startsWith('sk-') ? 'starts with sk-' : 'does NOT start with sk-'}${/\s/.test(KEY) ? ', CONTAINS WHITESPACE' : ''}${/^["']|["']$/.test(KEY) ? ', HAS QUOTES AROUND IT' : ''}` : 'not set');
   line(null, 'Model', MODEL);
   const proxy = process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy;
@@ -127,7 +126,7 @@ async function main() {
       const ids = (JSON.parse(body).data ?? []).map((m) => m.id);
       line(true, `HTTP ${res.status}: key accepted`, `${ids.length} models available; ${MODEL} ${ids.includes(MODEL) ? 'is' : 'is NOT'} among them`);
       if (!ids.includes(MODEL)) {
-        line(false, `set ${P.name === 'qwen' ? 'QWEN_MODEL' : 'OPENAI_MODEL'} in .env to one of your models`, ids.filter((id) => /^(gpt|o\d|qwen)/.test(id)).slice(0, 12).join(', '));
+        line(false, 'set QWEN_MODEL in .env to one of your models', ids.filter((id) => /qwen/i.test(id)).slice(0, 15).join(', '));
         verdicts.push('F');
       }
     } else {
@@ -141,7 +140,7 @@ async function main() {
     const res = await fetch(`${BASE}/chat/completions`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${KEY}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: MODEL, messages: [{ role: 'user', content: 'Reply with the single word: ready' }], ...(P.name === 'qwen' ? { max_tokens: 50 } : { max_completion_tokens: 200 }) }),
+      body: JSON.stringify({ model: MODEL, messages: [{ role: 'user', content: 'Reply with the single word: ready' }], max_tokens: 50, enable_thinking: false }),
       signal: AbortSignal.timeout(60000),
     });
     const body = await res.text();

@@ -1,3 +1,5 @@
+// The `openai` package is used only as an HTTP client for Qwen's
+// OpenAI-compatible API; no requests go to OpenAI.
 import OpenAI from 'openai';
 
 // The AI teacher. Server side only: API keys are read from the server's
@@ -5,14 +7,14 @@ import OpenAI from 'openai';
 //
 // The tutor engine (tutor.js) owns the lesson state (curriculum position,
 // current exercise, review queue, progress). Each turn it hands the teacher a
-// full description of that state plus what Roy just said; the teacher (a Qwen or
-// OpenAI model) decides what Roy meant, whether it shows understanding, and
+// full description of that state plus what Roy just said; the teacher (a Qwen
+// model) decides what Roy meant, whether it shows understanding, and
 // what to say next, and returns that as structured lesson state plus speech.
 
 
 export class TeacherNotConfigured extends Error {
-  constructor(keyName = 'OPENAI_API_KEY') {
-    super(`${keyName} is not configured.`);
+  constructor() {
+    super('Qwen is not configured: DASHSCOPE_API_KEY is missing.');
     this.status = 503;
     this.code = 'ai_not_configured';
   }
@@ -100,53 +102,27 @@ SPEAKING STYLE
 - zh lines: Chinese characters only, so the Mandarin voice reads them. To show pinyin, put the characters in text and "characters — pinyin" in show. Never put pinyin or Chinese inside an en line's text except in show.
 - Always end with one clear question or instruction for Roy that matches the listening language in the lesson state (Mandarin or English), unless the session is ending.`;
 
-// ---------- providers ----------
+// ---------- provider: Qwen (the only provider) ----------
 //
-// Both providers speak the OpenAI chat-completions protocol, so the same SDK
-// client is used with a different base URL and key.
-//
-//   AI_PROVIDER=qwen    (primary) Qwen through Alibaba Cloud Model Studio's
-//                       OpenAI-compatible endpoint. Key: QWEN_API_KEY (or
-//                       DASHSCOPE_API_KEY). QWEN_BASE_URL picks the region.
-//   AI_PROVIDER=openai  OpenAI. Key: OPENAI_API_KEY.
-//
-// If AI_PROVIDER is not set: Qwen when a Qwen key exists, otherwise OpenAI when
-// an OpenAI key exists, otherwise Qwen (reported as not configured).
+// Qwen through Alibaba Cloud Model Studio's OpenAI-compatible API.
+//   DASHSCOPE_API_KEY     required, read from the server environment only
+//   QWEN_MODEL            default qwen3.8-flash
+//   QWEN_BASE_URL         default: the Beijing compatible-mode workspace endpoint
+//   QWEN_ENABLE_THINKING  default false (faster replies for voice; Qwen3 models
+//                         also require it off for non-streaming calls)
 
-const QWEN_INTL = 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1';
+export const QWEN_DEFAULT_MODEL = 'qwen3.8-flash';
+export const QWEN_DEFAULT_BASE_URL = 'https://ws-c2mgxehx4ud1bn7.cn-beijing.maas.aliyuncs.com/compatible-mode/v1';
 
-export function providerSettings(env = process.env) {
-  const qwenKey = env.QWEN_API_KEY || env.DASHSCOPE_API_KEY || '';
-  const openaiKey = env.OPENAI_API_KEY || '';
-  const requested = (env.AI_PROVIDER || '').trim().toLowerCase();
-  const name = requested || (qwenKey ? 'qwen' : openaiKey ? 'openai' : 'qwen');
-  if (name === 'qwen') {
-    return {
-      name: 'qwen',
-      label: 'Qwen',
-      keyName: env.DASHSCOPE_API_KEY && !env.QWEN_API_KEY ? 'DASHSCOPE_API_KEY' : 'QWEN_API_KEY',
-      apiKey: qwenKey,
-      baseURL: env.QWEN_BASE_URL || QWEN_INTL,
-      model: env.QWEN_MODEL || 'qwen-plus',
-      // Qwen's compatible mode: JSON mode (the reply is checked against the
-      // schema below) and max_tokens; no reasoning_effort.
-      structured: 'json_object',
-      extra: { max_tokens: 4000 },
-    };
-  }
-  if (name === 'openai') {
-    return {
-      name: 'openai',
-      label: 'OpenAI',
-      keyName: 'OPENAI_API_KEY',
-      apiKey: openaiKey,
-      baseURL: env.OPENAI_BASE_URL || undefined,
-      model: env.OPENAI_MODEL || 'gpt-5.5',
-      structured: 'json_schema',
-      extra: { max_completion_tokens: 4000, reasoning_effort: env.OPENAI_REASONING_EFFORT || 'low' },
-    };
-  }
-  throw new Error(`AI_PROVIDER must be "qwen" or "openai", not "${env.AI_PROVIDER}".`);
+export function qwenSettings(env = process.env) {
+  return {
+    label: 'Qwen',
+    keyName: 'DASHSCOPE_API_KEY',
+    apiKey: env.DASHSCOPE_API_KEY || '',
+    model: env.QWEN_MODEL || QWEN_DEFAULT_MODEL,
+    baseURL: env.QWEN_BASE_URL || QWEN_DEFAULT_BASE_URL,
+    enableThinking: /^(1|true|yes)$/i.test(env.QWEN_ENABLE_THINKING || ''),
+  };
 }
 
 // Checks a reply against DECISION_SCHEMA (used when the provider only
@@ -175,35 +151,35 @@ const JSON_INSTRUCTIONS = `\n\nOUTPUT FORMAT\nReply with one JSON object only, n
 
 export function createTeacher({ client, log = console, env = process.env } = {}) {
   // Read when the teacher is created, after .env has been loaded.
-  const p = providerSettings(env);
-  if (!client && !p.apiKey) {
-    return { configured: false, provider: p.name, label: p.label, keyName: p.keyName, model: p.model, baseURL: p.baseURL, async decide() { throw new TeacherNotConfigured(p.keyName); } };
+  const q = qwenSettings(env);
+  const info = { provider: 'qwen', label: q.label, keyName: q.keyName, model: q.model, baseURL: q.baseURL };
+  if (!client && !q.apiKey) {
+    return { configured: false, ...info, async decide() { throw new TeacherNotConfigured(); } };
   }
-  const api = client ?? new OpenAI({ apiKey: p.apiKey, baseURL: p.baseURL });
-  const system = p.structured === 'json_object' ? SYSTEM_PROMPT + JSON_INSTRUCTIONS : SYSTEM_PROMPT;
-  const responseFormat = p.structured === 'json_object'
-    ? { type: 'json_object' }
-    : { type: 'json_schema', json_schema: { name: 'teacher_decision', strict: true, schema: DECISION_SCHEMA } };
+  const api = client ?? new OpenAI({ apiKey: q.apiKey, baseURL: q.baseURL });
+  // JSON mode with the schema in the prompt; every reply is checked below.
+  const system = SYSTEM_PROMPT + JSON_INSTRUCTIONS;
 
   async function call(messages) {
     const started = Date.now();
-    const completion = await api.chat.completions.create({ model: p.model, ...p.extra, response_format: responseFormat, messages });
+    const completion = await api.chat.completions.create({
+      model: q.model,
+      max_tokens: 4000,
+      response_format: { type: 'json_object' },
+      enable_thinking: q.enableThinking,
+      messages,
+    });
     const choice = completion.choices[0];
-    log.log(`[teacher] <- ${p.label} id=${completion.id} model=${completion.model} finish=${choice.finish_reason} ${Date.now() - started}ms tokens=${completion.usage?.total_tokens ?? '?'}`);
-    if (choice.message.refusal) throw new Error(`The AI teacher refused: ${choice.message.refusal}`);
+    log.log(`[teacher] <- Qwen id=${completion.id} model=${completion.model} finish=${choice.finish_reason} ${Date.now() - started}ms tokens=${completion.usage?.total_tokens ?? '?'}`);
     if (choice.finish_reason === 'length') throw new Error('The AI teacher reply was cut off (token limit).');
     return choice.message.content ?? '';
   }
 
   return {
     configured: true,
-    provider: p.name,
-    label: p.label,
-    keyName: p.keyName,
-    model: p.model,
-    baseURL: p.baseURL ?? 'https://api.openai.com/v1',
+    ...info,
     async decide(context) {
-      log.log(`[teacher] -> ${p.label} chat.completions model=${p.model} event=${context.event} exercise=${context.lesson_state?.exercise} roy="${context.roy_said?.text ?? ''}"`);
+      log.log(`[teacher] -> Qwen chat.completions model=${q.model} event=${context.event} exercise=${context.lesson_state?.exercise} roy="${context.roy_said?.text ?? ''}"`);
       const messages = [
         { role: 'system', content: system },
         { role: 'user', content: JSON.stringify(context, null, 1) },

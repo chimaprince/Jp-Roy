@@ -80,7 +80,6 @@ export class Tutor {
       lastStudyDate: progress.last_study_date,
       aiConfigured: Boolean(this.teacher.configured),
       aiProvider: this.teacher.label ?? null,
-      aiKeyName: this.teacher.configured ? null : this.teacher.keyName ?? null,
       session: session && !session.state.ended ? this.#view(session) : null,
     };
   }
@@ -350,7 +349,7 @@ export class Tutor {
   // ---------- state helpers ----------
 
   #requireTeacher() {
-    if (!this.teacher.configured) throw new TeacherNotConfigured(this.teacher.keyName);
+    if (!this.teacher.configured) throw new TeacherNotConfigured();
   }
 
   #activeSession(course, progress) {

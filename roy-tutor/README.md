@@ -10,16 +10,16 @@ Needs Node 22.5 or later (uses the built-in `node:sqlite`).
 ```
 cd roy-tutor
 npm install
-cp .env.example .env      # then fill in QWEN_API_KEY (or OPENAI_API_KEY)
-npm run check-ai          # checks the network path and key for the chosen provider
-npm run try-word1         # a real Word 1 conversation with the AI, printed
+cp .env.example .env      # then fill in DASHSCOPE_API_KEY
+npm run check-ai          # checks the network path, key and model for Qwen
+npm run try-word1         # a real Word 1 conversation with Qwen, printed
 npm start                 # http://localhost:3000
 npm test
 ```
 
-On startup the terminal shows the AI provider, the `.env` file used, that the key
-was detected (value hidden) and the model and endpoint. Every turn then logs a
-`[teacher] -> Qwen chat.completions ...` (or OpenAI) line and the reply's id. `.env` is ignored by Git; never commit it.
+On startup the terminal shows `AI provider: Qwen`, the model, the endpoint and
+`DASHSCOPE_API_KEY: detected (value hidden)`. Every turn then logs a
+`[teacher] -> Qwen chat.completions ...` line and the reply's id. `.env` is ignored by Git; never commit it.
 
 Open the page in Chrome or Edge (speech input). Press **🎙 START TALKING**.
 
@@ -27,18 +27,15 @@ Open the page in Chrome or Edge (speech input). Press **🎙 START TALKING**.
 
 | Variable | Purpose |
 |---|---|
-| `AI_PROVIDER` | `qwen` (primary) or `openai`. If unset: Qwen when a Qwen key is present, otherwise OpenAI. |
-| `QWEN_API_KEY` (or `DASHSCOPE_API_KEY`) | Key for Qwen through Alibaba Cloud Model Studio's OpenAI-compatible API. |
-| `QWEN_MODEL` | Default `qwen-plus`. |
-| `QWEN_BASE_URL` | Default `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` (international). Mainland China: `https://dashscope.aliyuncs.com/compatible-mode/v1`. |
-| `OPENAI_API_KEY` | Key for OpenAI, used when `AI_PROVIDER=openai`. |
-| `OPENAI_MODEL` | Default `gpt-5.5`. |
-| `OPENAI_REASONING_EFFORT` | Default `low` (faster replies for voice). |
+| `DASHSCOPE_API_KEY` | **Required.** Key for Qwen (Alibaba Cloud Model Studio, OpenAI-compatible API), the tutor's only AI provider. |
+| `QWEN_MODEL` | Default `qwen3.8-flash`. |
+| `QWEN_BASE_URL` | Default `https://ws-c2mgxehx4ud1bn7.cn-beijing.maas.aliyuncs.com/compatible-mode/v1`. |
+| `QWEN_ENABLE_THINKING` | Default `false` (faster replies for voice). |
 
-The selected provider's key is **required**: without it lessons do not start and
-the page shows "<KEY NAME> is not configured."; there is no scripted fallback.
-Qwen replies use JSON mode and are checked against the lesson schema on the
-server (one corrected retry, then an error); OpenAI uses a strict JSON schema.
+Without `DASHSCOPE_API_KEY` lessons do not start: the server and the page say
+"Qwen is not configured: DASHSCOPE_API_KEY is missing." There is no scripted
+fallback. Qwen replies use JSON mode and are checked against the lesson schema
+on the server (one corrected retry, then an error).
 
 | `TUTOR_ACCESS_CODE` | Optional passcode. The browser asks for it once. Set it when the app is on the internet. |
 | `TUTOR_TIMEZONE` | Roy's time zone (for example `Asia/Shanghai`), used to decide when a new study day starts. |
@@ -55,7 +52,7 @@ explain its meaning, use it in a sentence, role-play), when a word counts as
 complete, the daily review, jumps that keep Roy's place, and progress in the
 database.
 
-The **AI teacher** (`src/teacher.js`, Qwen or OpenAI, server side) owns the
+The **AI teacher** (`src/teacher.js`, Qwen, server side) owns the
 conversation. On every turn it receives the current entry (English, Mandarin,
 pinyin with tones, source meaning), recent and weak words, the lesson state,
 this session's conversation, and what Roy said, including the recogniser's
@@ -118,7 +115,7 @@ twice on it.
 ```
 server.js              HTTP server and JSON API
 src/tutor.js           tutor engine: lesson state, order, review, jumps, progress
-src/teacher.js         the AI teacher: Qwen (primary) or OpenAI, server side only
+src/teacher.js         the AI teacher (Qwen, server side only)
 src/recognition.js     word recognition from the transcript; pronunciation hook
 src/intents.js         resolves a jump target to a curriculum entry
 src/match.js           text normalisation helpers

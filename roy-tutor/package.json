@@ -1,6 +1,6 @@
 {
   "name": "roy-medical-chinese-tutor",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": true,
   "description": "Voice-first medical Chinese tutor for Roy, driven by the JH Medics Volume 1 curriculum.",
   "type": "module",
@@ -11,8 +11,7 @@
     "start": "node --disable-warning=ExperimentalWarning server.js",
     "import": "node --disable-warning=ExperimentalWarning scripts/import-curriculum.js",
     "test": "node --disable-warning=ExperimentalWarning --test test/*.test.js",
-    "check-openai": "node --disable-warning=ExperimentalWarning scripts/check-openai.mjs",
-    "check-ai": "node --disable-warning=ExperimentalWarning scripts/check-openai.mjs",
+    "check-ai": "node --disable-warning=ExperimentalWarning scripts/check-ai.mjs",
     "try-word1": "node --disable-warning=ExperimentalWarning scripts/try-word1.mjs"
   },
   "dependencies": {
