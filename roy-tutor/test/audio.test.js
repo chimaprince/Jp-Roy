@@ -1,4 +1,4 @@
-// Server-side voice: Qwen ASR (qwen3-asr-flash) and Qwen TTS (qwen3-tts-instruct-flash).
+// Server-side voice: Qwen ASR (qwen-audio-3.1-asr-flash) and Qwen TTS (qwen3-tts-instruct-flash).
 // Real Qwen is replaced by a local stand-in server that checks every request
 // the tutor makes, so these tests run offline.
 import { test } from 'node:test';
@@ -12,7 +12,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   createVoice, voiceSettings, SpeechStore, parseAsrReply, parseTtsReply, asrLanguage, ttsLanguage, audioMime,
-  ASR_DEFAULT_MODEL, ASR_DEFAULT_BASE_URL, TTS_DEFAULT_MODEL, TTS_DEFAULT_URL, TTS_DEFAULT_INSTRUCTIONS_ZH, TTS_DEFAULT_INSTRUCTIONS_EN, audioInfo, asrEndpointProblem,
+  ASR_DEFAULT_MODEL, ASR_DEFAULT_BASE_URL, TTS_DEFAULT_MODEL, TTS_DEFAULT_URL, TTS_DEFAULT_INSTRUCTIONS_ZH, TTS_DEFAULT_INSTRUCTIONS_EN, audioInfo, asrEndpointProblem, asrContext, asrProtocol, asrEndpoint,
 } from '../src/voice.js';
 import {
   encodeWav, resample, toMono, SilenceDetector, rms, pickRecorderType, uploadType, playbackRate, STATES, BUSY_STATES, silentWav,
@@ -117,25 +117,95 @@ function fakeFetch(handler) {
 const WAV = Buffer.from(encodeWav(new Float32Array(1600).fill(0.1), 16000));
 const quiet = () => {};
 
-test('defaults: qwen3-asr-flash and qwen3-tts-instruct-flash on the Singapore endpoint', () => {
+test('defaults: qwen-audio-3.1-asr-flash and qwen3-tts-instruct-flash on the Singapore endpoint', () => {
   const s = voiceSettings({ DASHSCOPE_API_KEY: KEY });
-  assert.equal(s.asrModel, 'qwen3-asr-flash');
+  assert.equal(s.asrModel, 'qwen-audio-3.1-asr-flash');
   assert.equal(s.ttsModel, 'qwen3-tts-instruct-flash');
   assert.equal(ASR_DEFAULT_BASE_URL, 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1');
   assert.equal(TTS_DEFAULT_URL, 'https://dashscope-intl.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation');
   assert.equal(s.asrBaseURL, ASR_DEFAULT_BASE_URL);
   assert.equal(s.ttsURL, TTS_DEFAULT_URL);
-  assert.equal(ASR_DEFAULT_MODEL, 'qwen3-asr-flash');
+  assert.equal(ASR_DEFAULT_MODEL, 'qwen-audio-3.1-asr-flash');
   assert.equal(TTS_DEFAULT_MODEL, 'qwen3-tts-instruct-flash');
   const custom = voiceSettings({ QWEN_ASR_MODEL: 'a', QWEN_TTS_MODEL: 'b', QWEN_TTS_VOICE: 'Ethan', QWEN_ASR_BASE_URL: 'http://x/v1/', QWEN_TTS_URL: 'http://y' });
   assert.deepEqual([custom.asrModel, custom.ttsModel, custom.ttsVoice, custom.asrBaseURL, custom.ttsURL], ['a', 'b', 'Ethan', 'http://x/v1', 'http://y']);
 });
 
-test('ASR request: the recording as input_audio, the lesson language as the hint, the key only in the header', async () => {
+const WS = 'https://ws-test123.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1';
+const WS_NATIVE = 'https://ws-test123.ap-southeast-1.maas.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation';
+const EPIDURAL = { mandarin: '硬膜外', pinyin: 'yìng mó wài', english: 'epidural' };
+
+test('qwen-audio-3.1-asr-flash: DashScope native request on the Singapore workspace host, with lesson context', async () => {
+  const { fn, calls } = fakeFetch(() => ({ json: { request_id: 'r1', output: { text: '硬膜外' }, usage: { seconds: 1 } } }));
+  const voice = createVoice({ env: { DASHSCOPE_API_KEY: KEY, QWEN_ASR_MODEL: 'qwen-audio-3.1-asr-flash', QWEN_ASR_BASE_URL: WS }, fetchImpl: fn, log: quiet });
+  assert.equal(voice.asrURL, WS_NATIVE, 'the native endpoint on the workspace host');
+  assert.equal(voice.asrProtocol, 'native');
+  const out = await voice.transcribe(WAV, 'audio/wav', 'zh-CN', { entry: EPIDURAL });
+  assert.equal(out.text, '硬膜外');
+  assert.equal(out.status, 200);
+  assert.equal(out.request, 'context+language');
+  const c = calls[0];
+  assert.equal(c.url, WS_NATIVE);
+  assert.equal(c.method, 'POST');
+  assert.equal(c.headers.Authorization, `Bearer ${KEY}`);
+  assert.doesNotMatch(JSON.stringify(c.body), new RegExp(KEY), 'the key is not in the request body');
+  assert.equal(c.body.model, 'qwen-audio-3.1-asr-flash');
+  const [system, user] = c.body.input.messages;
+  assert.equal(system.role, 'system');
+  assert.match(system.content[0].text, /当前术语：硬膜外（yìng mó wài，epidural）/, 'the current term is the recognition context');
+  assert.match(system.content[0].text, /医学/);
+  assert.equal(user.role, 'user');
+  assert.equal(user.content[0].type, 'input_audio');
+  assert.equal(user.content[0].input_audio.data, `data:audio/wav;base64,${WAV.toString('base64')}`);
+  assert.deepEqual(c.body.parameters, { format: 'wav', sample_rate: '16000', language_hints: ['zh'] });
+
+  await voice.transcribe(WAV, 'audio/wav', 'en-US', { entry: EPIDURAL });
+  assert.deepEqual(calls[1].body.parameters.language_hints, ['en'], 'English exercises hint English');
+  const noEntry = await voice.transcribe(WAV, 'audio/wav', 'zh-CN');
+  assert.equal(noEntry.request, 'context+language', 'general medical context even without a term');
+  assert.doesNotMatch(calls[2].body.input.messages[0].content[0].text, /当前术语/);
+  assert.equal(asrContext(null).includes('医学中文'), true);
+});
+
+test('qwen-audio ASR: an invalid-request 400 falls back to plainer requests; other errors do not', async () => {
+  const bodies = [];
+  const { fn } = fakeFetch((c) => {
+    bodies.push(c.body);
+    return bodies.length < 3 ? { status: 400, json: { code: 'InvalidParameter', message: 'bad field' } } : { json: { output: { text: '硬膜外' } } };
+  });
+  const voice = createVoice({ env: { DASHSCOPE_API_KEY: KEY, QWEN_ASR_BASE_URL: WS }, fetchImpl: fn, log: quiet });
+  const out = await voice.transcribe(WAV, 'audio/wav', 'zh-CN', { entry: EPIDURAL });
+  assert.equal(out.request, 'plain');
+  assert.equal(bodies.length, 3);
+  assert.equal(bodies[0].input.messages[0].role, 'system');
+  assert.equal(bodies[1].input.messages.length, 1, 'second try: no context');
+  assert.equal(bodies[2].parameters.language_hints, undefined, 'third try: no language hint');
+
+  const allBad = createVoice({ env: { DASHSCOPE_API_KEY: KEY, QWEN_ASR_BASE_URL: WS }, fetchImpl: fakeFetch(() => ({ status: 400, json: { code: 'InvalidParameter' } })).fn, log: quiet });
+  await assert.rejects(allBad.transcribe(WAV, 'audio/wav', 'zh-CN'), (e) => e.code === 'asr_failed' && e.httpStatus === 400 && /InvalidParameter/.test(e.detail));
+
+  let n = 0;
+  const denied = createVoice({ env: { DASHSCOPE_API_KEY: KEY, QWEN_ASR_BASE_URL: WS }, fetchImpl: fakeFetch(() => { n += 1; return { status: 403, json: { code: 'AccessDenied.Unpurchased' } }; }).fn, log: quiet });
+  await assert.rejects(denied.transcribe(WAV, 'audio/wav', 'zh-CN'), (e) => e.httpStatus === 403 && /Unpurchased/.test(e.detail));
+  assert.equal(n, 1, 'a 403 is not retried');
+});
+
+test('native ASR reply shapes: output.text, sentences, or a message', () => {
+  assert.equal(parseAsrReply({ output: { text: ' 硬膜外。 ' } }).text, '硬膜外。');
+  assert.equal(parseAsrReply({ output: { sentences: [{ text: '硬膜' }, { text: '外' }] } }).text, '硬膜外');
+  assert.equal(parseAsrReply({ output: { sentence: [{ text: '硬膜外' }] } }).text, '硬膜外');
+  assert.equal(parseAsrReply({ output: { choices: [{ message: { content: [{ text: '硬膜外' }] } }] } }).text, '硬膜外');
+  assert.equal(parseAsrReply({ output: {} }).text, '');
+  assert.equal(asrProtocol('qwen3-asr-flash'), 'openai');
+  assert.equal(asrProtocol('qwen-audio-3.1-asr-flash'), 'native');
+  assert.equal(asrEndpoint({ model: 'qwen-audio-3.1-asr-flash', baseURL: WS, url: 'https://x.test/full' }), 'https://x.test/full', 'QWEN_ASR_URL wins');
+});
+
+test('qwen3-asr-flash (older model) still uses the OpenAI-compatible request', async () => {
   const { fn, calls } = fakeFetch(() => ({ json: { choices: [{ message: { content: '硬膜外', annotations: [{ type: 'audio_info', language: 'zh' }] } }] } }));
-  const voice = createVoice({ env: { DASHSCOPE_API_KEY: KEY }, fetchImpl: fn, log: quiet });
+  const voice = createVoice({ env: { DASHSCOPE_API_KEY: KEY, QWEN_ASR_MODEL: 'qwen3-asr-flash' }, fetchImpl: fn, log: quiet });
   const out = await voice.transcribe(WAV, 'audio/wav', 'zh-CN');
-  assert.deepEqual(out, { text: '硬膜外', language: 'zh-CN', detectedLanguage: 'zh', model: 'qwen3-asr-flash', status: 200 });
+  assert.deepEqual(out, { text: '硬膜外', language: 'zh-CN', detectedLanguage: 'zh', model: 'qwen3-asr-flash', status: 200, request: 'openai' });
   const c = calls[0];
   assert.equal(c.url, 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions');
   assert.equal(c.headers.Authorization, `Bearer ${KEY}`);
@@ -151,8 +221,8 @@ test('ASR request: the recording as input_audio, the lesson language as the hint
   assert.match(calls[1].body.messages[0].content[0].input_audio.data, /^data:audio\/mp4;base64,/);
 });
 
-test('ASR uses the Singapore workspace endpoint from QWEN_ASR_BASE_URL and reports the HTTP status', async () => {
-  const ws = 'https://ws-test123.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1';
+test('qwen3-asr-flash on the Singapore workspace endpoint reports the HTTP status', async () => {
+  const ws = WS;
   const { fn, calls } = fakeFetch(() => ({ json: { choices: [{ message: { content: '硬膜外' } }] } }));
   const voice = createVoice({ env: { DASHSCOPE_API_KEY: KEY, QWEN_ASR_MODEL: 'qwen3-asr-flash', QWEN_ASR_BASE_URL: ws + '/' }, fetchImpl: fn, log: quiet });
   const out = await voice.transcribe(WAV, 'audio/wav', 'zh-CN');
@@ -315,6 +385,13 @@ async function startFakeQwen() {
       if (control.asrStatus !== 200) return json(control.asrStatus, { error: { message: 'upstream exploded' } });
       return json(200, { choices: [{ message: { role: 'assistant', content: control.asrText, annotations: [{ type: 'audio_info', language: 'zh' }] } }] });
     }
+    // qwen-audio-*-asr: DashScope native endpoint on the (workspace) host.
+    if (req.url === '/api/v1/services/aigc/multimodal-generation/generation') {
+      const body = JSON.parse(raw);
+      seen.asr.push(body);
+      if (control.asrStatus !== 200) return json(control.asrStatus, { code: 'InternalError', message: 'upstream exploded' });
+      return json(200, { request_id: 'asr-1', output: { text: control.asrText }, usage: { seconds: 1 } });
+    }
     if (req.url === '/tts') {
       const body = JSON.parse(raw);
       seen.tts.push(body);
@@ -389,9 +466,10 @@ test('end to end: recording → Qwen ASR → tutor engine → Qwen TTS audio, ke
     assert.equal(heard.text, '硬膜外');
     assert.equal(heard.language, 'zh-CN');
     const asrCall = qwen.seen.asr.at(-1);
-    assert.equal(asrCall.model, 'qwen3-asr-flash');
-    assert.equal(asrCall.asr_options.language, 'zh');
-    assert.equal(asrCall.messages[0].content[0].input_audio.data, `data:audio/wav;base64,${WAV.toString('base64')}`);
+    assert.equal(asrCall.model, 'qwen-audio-3.1-asr-flash');
+    assert.deepEqual(asrCall.parameters.language_hints, ['zh']);
+    assert.match(asrCall.input.messages[0].content[0].text, /当前术语：硬膜外/, 'the current lesson term is sent as context');
+    assert.equal(asrCall.input.messages.at(-1).content[0].input_audio.data, `data:audio/wav;base64,${WAV.toString('base64')}`);
 
     // The transcript goes to the engine like a typed answer; the lesson moves on.
     const turn = await postJson(`${s.url}/api/session/message`, { text: heard.text, source: 'voice', language: heard.language });
@@ -408,17 +486,18 @@ test('end to end: recording → Qwen ASR → tutor engine → Qwen TTS audio, ke
     // English exercise: the upload asks Qwen for English.
     qwen.control.asrText = 'an injection into the spine';
     await fetch(`${s.url}/api/voice/transcribe?lang=en-US`, { method: 'POST', headers: { 'Content-Type': 'audio/mp4' }, body: WAV });
-    assert.equal(qwen.seen.asr.at(-1).asr_options.language, 'en');
+    assert.deepEqual(qwen.seen.asr.at(-1).parameters.language_hints, ['en']);
+    assert.match(qwen.seen.asr.at(-1).input.messages[0].content[0].text, /硬膜外/, 'context even when the card hides a field');
 
     // The key: only ever in the Authorization header to Qwen.
     assert.deepEqual([...qwen.seen.auth], [`Bearer ${KEY}`]);
     const status = await (await fetch(`${s.url}/api/status`)).text();
     everything.push(status);
-    assert.match(status, /qwen3-asr-flash/);
+    assert.match(status, /qwen-audio-3\.1-asr-flash/);
     for (const page of ['/', '/app.js', '/voice-core.js']) everything.push(await (await fetch(`${s.url}${page}`)).text());
     for (const text of everything) assert.ok(!text.includes(KEY) && !/DASHSCOPE_API_KEY=|Authorization|Bearer/.test(text), 'no key in anything the browser receives');
     assert.ok(!s.output().includes(KEY), 'the key is not printed');
-    assert.match(s.output(), /speech recognition: Qwen qwen3-asr-flash/);
+    assert.match(s.output(), /speech recognition: Qwen qwen-audio-3\.1-asr-flash at http:\/\/localhost:\d+\/api\/v1\/services\/aigc\/multimodal-generation\/generation/);
     assert.match(s.output(), /teacher voice: Qwen qwen3-tts-instruct-flash/);
   } finally {
     await s.stop();

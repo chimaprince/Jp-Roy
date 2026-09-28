@@ -33,8 +33,10 @@ Open the page in any current browser (Chrome, Edge, Safari, iPhone Safari). Pres
 | `QWEN_MODEL` | Default `qwen3.8-flash`. |
 | `QWEN_BASE_URL` | Default `https://ws-c2mgxehx4ud1bn7.cn-beijing.maas.aliyuncs.com/compatible-mode/v1`. |
 | `QWEN_ENABLE_THINKING` | Default `false` (faster replies for voice). |
-| `QWEN_ASR_MODEL` | Speech recognition model. Default `qwen3-asr-flash`. |
-| `QWEN_ASR_BASE_URL` | Your Singapore workspace endpoint: `https://<WORKSPACE_ID>.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1` (workspace ID from Model Studio). If unset: `https://dashscope-intl.aliyuncs.com/compatible-mode/v1`. |
+| `QWEN_ASR_MODEL` | Speech recognition model. Default `qwen-audio-3.1-asr-flash` (DashScope native API). `qwen3-asr-*` models use the OpenAI-compatible API instead. |
+| `QWEN_ASR_BASE_URL` | Your Singapore workspace host: `https://<WORKSPACE_ID>.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1` (workspace ID from Model Studio). For `qwen-audio-*` models the request goes to `/api/v1/services/aigc/multimodal-generation/generation` on this host. If unset: `dashscope-intl.aliyuncs.com`. |
+| `QWEN_ASR_URL` | Optional: the full ASR endpoint, overriding the one derived from `QWEN_ASR_BASE_URL`. |
+| `QWEN_ASR_CONTEXT` | Default on: the current lesson term (Mandarin, pinyin, English) and a medical-Chinese note are sent as recognition context. `off` to disable. |
 | `QWEN_TTS_MODEL` | Teacher voice model. Default `qwen3-tts-instruct-flash`. |
 | `QWEN_TTS_URL` | Default `https://dashscope-intl.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation` (Singapore). |
 | `QWEN_TTS_VOICE` | Default `Cherry` (speaks Mandarin and English). |
@@ -156,9 +158,15 @@ TEACHER THINKING → … → LISTENING AGAIN
 **Speech in (Qwen ASR).** The page records with the microphone (`MediaRecorder`;
 iPhone Safari records mp4), stops when Roy pauses (or when he taps
 **✋ DONE TALKING**), converts the recording to 16 kHz mono WAV and uploads it
-to `POST /api/voice/transcribe`. The server sends it to **qwen3-asr-flash** with
-the lesson's language as a hint: Mandarin for saying the term, sentences,
-role-play and review; English for explaining the meaning. The transcript then
+to `POST /api/voice/transcribe`. The server sends it to **qwen-audio-3.1-asr-flash**
+(your Singapore workspace host) with the lesson's language as a hint: Mandarin
+for saying the term, sentences, role-play and review; English for explaining
+the meaning. The current JH Medics term (characters, pinyin, English) is sent
+as recognition context so medical vocabulary is recognised better. That can
+also make a near-miss come out as the correct characters, so the transcript is
+word recognition, not proof of pronunciation. If Alibaba rejects the context
+or language hint as invalid (HTTP 400), the server retries without the context,
+then without the hint, and logs each attempt. The transcript then
 goes to the tutor exactly like a typed answer (marked as voice). If Roy wants
 to answer in the other language ("I don't know" during a Mandarin exercise),
 he taps **Answer language: … · switch to …** for that one answer.
