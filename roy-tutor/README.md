@@ -15,6 +15,7 @@ npm run check-ai          # checks the network path, key and model for Qwen
 npm run try-word1         # a real Word 1 conversation with Qwen, printed
 npm run check-voice       # real Qwen TTS + ASR round trip (saves voice-check.wav)
 npm start                 # http://localhost:3000
+npm run start:https       # https://localhost:3443 (phone microphone; see below)
 npm test
 ```
 
@@ -53,7 +54,9 @@ loads another file; `TUTOR_ENV_FILE=none` loads none (the tests use this).
 | `TUTOR_DB` | SQLite file path, default `roy-tutor/tutor.db`. |
 | `PORT` | Default `3000`. |
 | `HOST` | Default `0.0.0.0` (reachable from your phone on the same Wi-Fi); `127.0.0.1` for this computer only. |
-| `TUTOR_HTTPS_CERT`, `TUTOR_HTTPS_KEY` | Optional certificate and key files to serve over https (needed for the phone microphone). |
+| `TUTOR_HTTPS_CERT`, `TUTOR_HTTPS_KEY` | Optional certificate and key files to serve over https (needed for the phone microphone). `npm run start:https` makes its own if these are not set. |
+| `TUTOR_SETUP_PORT` | HTTPS mode: port of the plain-HTTP phone setup page. Default `3000`; `off` to disable. |
+| `TUTOR_HTTPS_HOSTS` | HTTPS mode: extra host names/IPs for the development certificate (comma-separated). |
 
 Without `DASHSCOPE_API_KEY` lessons do not start: the server and the page say
 "Qwen is not configured: DASHSCOPE_API_KEY is missing." There is no scripted
@@ -99,34 +102,77 @@ New-NetFirewallRule -DisplayName "Roy tutor (dev) 3000" -Direction Inbound -Prot
 
 **The microphone needs https or localhost.** Phone browsers block the
 microphone on plain `http://192.168.x.x`. The page still works there (the
-teacher speaks; you can type), and it says why the microphone is off. To talk
-from the phone, use one of these (on iPhone, only option 3 works):
+teacher speaks; you can type), and it says why the microphone is off.
 
-1. *Android Chrome, quickest:* on the phone open
-   `chrome://flags/#unsafely-treat-insecure-origin-as-secure`, enter
-   `http://192.168.1.23:3000` (your address), set it to Enabled, relaunch
-   Chrome. For testing only.
-2. *USB cable (Android):* enable USB debugging on the phone, connect it, open
-   `chrome://inspect/#devices` on the laptop, add port forwarding
-   `3000 → localhost:3000`, then open `http://localhost:3000` on the phone.
-3. *HTTPS with a local certificate (Android or iPhone):* install mkcert
-   (`winget install FiloSottile.mkcert`), run `mkcert -install` and
-   `mkcert -cert-file certs/lan.pem -key-file certs/lan-key.pem 192.168.1.23 localhost`
-   in `roy-tutor`, add to `.env`:
-   ```
-   TUTOR_HTTPS_CERT=certs/lan.pem
-   TUTOR_HTTPS_KEY=certs/lan-key.pem
-   ```
-   restart, and open `https://192.168.1.23:3000`. The phone must trust
-   mkcert's root certificate (`mkcert -CAROOT` shows where `rootCA.pem` is;
-   install it on the phone as a CA certificate). `certs/` is ignored by Git.
+### HTTPS development mode (`npm run start:https`) - iPhone microphone
 
-   **iPhone, step by step:** after `mkcert -install`, AirDrop or email
-   `rootCA.pem` (from the `mkcert -CAROOT` folder) to the iPhone and open it;
-   then Settings › General › VPN & Device Management › install the profile;
-   then Settings › General › About › Certificate Trust Settings › turn on full
-   trust for the mkcert root. Open `https://192.168.1.23:3000` in Safari, tap
-   START TALKING and allow the microphone.
+```
+npm run start:https
+```
+
+This runs the same tutor app and API as `npm start`, but over HTTPS on port
+**3443**, on every network adapter (`0.0.0.0`). On first run it creates, in
+`roy-tutor/certs/` (ignored by Git):
+
+- `dev-ca.crt`: a private certificate authority for this laptop only. This is
+  the file the phone trusts, once.
+- `dev-server.crt`: the HTTPS certificate, signed by that CA, for `localhost`,
+  `127.0.0.1`, the Windows Mobile Hotspot address `192.168.137.1` and every
+  current network address. It is re-issued automatically when the addresses
+  change. Extra names can go in `TUTOR_HTTPS_HOSTS` (comma-separated).
+- The two `*-key.pem` private keys. They never leave the laptop and are never
+  served.
+
+It also starts a small **plain-HTTP phone setup page on port 3000**. It offers
+only the CA certificate download and sends everything else to HTTPS; the tutor
+API is not served over plain HTTP in this mode. Stop `npm start` first,
+because both use port 3000 (or set `TUTOR_SETUP_PORT`). The terminal prints the
+exact addresses, for example:
+
+```
+Roy Medical Chinese tutor on https://localhost:3443
+On your phone (same Wi-Fi or the laptop's hotspot), open:
+  https://192.168.137.1:3443   (Local Area Connection* 10 - Windows Mobile Hotspot: use this one for a phone on the hotspot)
+First time on the iPhone: trust the development certificate. In Safari open:
+  http://192.168.137.1:3000/   (Local Area Connection* 10, hotspot)
+  Certificate fingerprint (SHA-256): AB:CD:...
+```
+
+A phone on the laptop's **Mobile Hotspot** reaches the laptop at its hotspot
+address (usually `192.168.137.1`), not at the laptop's Wi-Fi address.
+
+**Windows Firewall** (PowerShell as administrator, once):
+
+```
+New-NetFirewallRule -DisplayName "Roy tutor (dev) https 3443" -Direction Inbound -Protocol TCP -LocalPort 3443 -Profile Private,Public -Action Allow
+New-NetFirewallRule -DisplayName "Roy tutor (dev) setup 3000" -Direction Inbound -Protocol TCP -LocalPort 3000 -Profile Private,Public -Action Allow
+```
+
+(The hotspot network is often classed as *Public*, hence both profiles.
+Remove the rules later with `Remove-NetFirewallRule -DisplayName "Roy tutor (dev) https 3443"`
+and `... "Roy tutor (dev) setup 3000"`.)
+
+**Trust the certificate on the iPhone (once):**
+
+1. In **Safari** on the iPhone open `http://192.168.137.1:3000/` and tap
+   **Download certificate**, then **Allow**. ("Profile Downloaded".)
+2. Settings › General › VPN & Device Management › **Roy Tutor Local Dev CA** ›
+   Install (enter the passcode) › Install.
+3. Settings › General › About › Certificate Trust Settings › turn **on** full
+   trust for **Roy Tutor Local Dev CA** › Continue.
+4. Open `https://192.168.137.1:3443` in Safari. There should be no warning.
+   Tap START TALKING and allow the microphone.
+
+To undo: Settings › General › VPN & Device Management › the profile › Remove.
+If you delete `certs/`, a new CA is created and the phone must trust the new
+one.
+
+Other options (Android): open
+`chrome://flags/#unsafely-treat-insecure-origin-as-secure` and add
+`http://<laptop-ip>:3000`, or use USB port forwarding from
+`chrome://inspect/#devices` to reach `http://localhost:3000`. Your own
+certificate (for example from mkcert) also works: set `TUTOR_HTTPS_CERT` and
+`TUTOR_HTTPS_KEY` in `.env`.
 
 Speech recognition and the teacher's voice run on the laptop (Qwen), so the
 phone only needs to reach the laptop over Wi-Fi.

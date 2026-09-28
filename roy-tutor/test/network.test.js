@@ -77,7 +77,7 @@ test('the server listens on all adapters, prints LAN URLs, and still works on lo
     assert.match(await page.text(), /ROY MEDICAL CHINESE/);
     const lan = lanAddresses();
     if (lan.length) {
-      assert.match(await s.waitFor(/On your phone/), /On your phone \(same Wi-Fi\), open:/);
+      assert.match(await s.waitFor(/On your phone/), /On your phone \(same Wi-Fi or the laptop's hotspot\), open:/);
       const viaLan = await fetch(`http://${lan[0].address}:${s.port}/api/status`);
       assert.equal(viaLan.status, 200, 'reachable through a LAN address, not only localhost');
     }

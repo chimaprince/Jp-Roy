@@ -10,6 +10,7 @@ import { loadConfiguredCourses } from './src/curriculum.js';
 import { createTeacher } from './src/teacher.js';
 import { Tutor } from './src/tutor.js';
 import { serverUrls } from './src/network.js';
+import { createSetupServer } from './src/devsetup.js';
 import { createVoice, SpeechStore, VoiceError, audioMime, MAX_AUDIO_BYTES, asrEndpointProblem } from './src/voice.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -24,6 +25,11 @@ const HTTPS_CERT = process.env.TUTOR_HTTPS_CERT || '';
 const HTTPS_KEY = process.env.TUTOR_HTTPS_KEY || '';
 // Optional shared passcode so the app is not open to anyone who finds the URL.
 const ACCESS_CODE = process.env.TUTOR_ACCESS_CODE || '';
+// HTTPS development mode (npm run start:https): the local CA certificate the
+// phone installs, and the plain-HTTP port that offers it for download.
+const DEV_CA = process.env.TUTOR_DEV_CA || '';
+const SETUP_PORT = process.env.TUTOR_SETUP_PORT || '3000';
+const DEV_CA_FINGERPRINT = process.env.TUTOR_DEV_CA_FINGERPRINT || '';
 
 const db = openDb(process.env.TUTOR_DB || path.join(here, 'tutor.db'));
 for (const r of loadConfiguredCourses(db, path.join(here, 'data'))) {
@@ -181,15 +187,32 @@ const server = secure
   ? https.createServer({ cert: fs.readFileSync(HTTPS_CERT), key: fs.readFileSync(HTTPS_KEY) }, handler)
   : http.createServer(handler);
 
+const setupPort = secure && DEV_CA && SETUP_PORT !== 'off' && Number(SETUP_PORT) !== PORT ? Number(SETUP_PORT) : null;
+
 server.listen(PORT, HOST, () => {
-  const urls = serverUrls({ host: HOST, port: PORT, secure });
+  const urls = serverUrls({ host: HOST, port: server.address().port, secure });
   console.log(`Roy Medical Chinese tutor on ${urls.local}`);
   if (urls.lan.length) {
-    console.log('On your phone (same Wi-Fi), open:');
-    for (const a of urls.lan) console.log(`  ${a.url}   (${a.name})`);
+    console.log(`On your phone (same Wi-Fi or the laptop's hotspot), open:`);
+    for (const a of urls.lan) console.log(`  ${a.url}   (${a.name}${a.hotspot ? ' - Windows Mobile Hotspot: use this one for a phone on the hotspot' : ''})`);
     if (!secure) console.log('  Note: phones only allow the microphone on https:// or localhost. See README "Testing on a phone".');
     if (!ACCESS_CODE) console.log('  Tip: set TUTOR_ACCESS_CODE so other people on this network cannot use your Qwen quota.');
   } else if (HOST !== '0.0.0.0' && HOST !== '::') {
     console.log(`Listening on ${HOST} only (not reachable from other devices).`);
   }
 });
+
+// First-time phone setup over plain HTTP: download and trust the local CA.
+if (setupPort !== null) {
+  const setup = createSetupServer({ caFile: DEV_CA, httpsPort: PORT, fingerprint: DEV_CA_FINGERPRINT });
+  setup.on('error', (err) => console.error(`  Phone setup page not started on port ${setupPort}: ${err.code || err.message}. Is "npm start" still running? Stop it, or set TUTOR_SETUP_PORT.`));
+  setup.listen(setupPort, HOST, () => {
+    const urls = serverUrls({ host: HOST, port: setup.address().port, secure: false });
+    console.log('');
+    console.log('First time on the iPhone: trust the development certificate. In Safari open:');
+    for (const a of urls.lan) console.log(`  ${a.url}/   (${a.name}${a.hotspot ? ', hotspot' : ''})`);
+    if (!urls.lan.length) console.log(`  ${urls.local}/`);
+    console.log('  then follow the steps on that page (download, install profile, turn on full trust).');
+    if (DEV_CA_FINGERPRINT) console.log(`  Certificate fingerprint (SHA-256): ${DEV_CA_FINGERPRINT}`);
+  });
+}

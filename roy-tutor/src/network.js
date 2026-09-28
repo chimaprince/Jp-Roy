@@ -9,7 +9,7 @@ export function lanAddresses(interfaces = os.networkInterfaces()) {
   for (const [name, addrs] of Object.entries(interfaces)) {
     for (const a of addrs ?? []) {
       const v4 = a.family === 'IPv4' || a.family === 4;
-      if (v4 && !a.internal && !a.address.startsWith('169.254.')) out.push({ name, address: a.address });
+      if (v4 && !a.internal && !a.address.startsWith('169.254.')) out.push({ name, address: a.address, ...(a.address.startsWith('192.168.137.') ? { hotspot: true } : {}) });
     }
   }
   return out;
