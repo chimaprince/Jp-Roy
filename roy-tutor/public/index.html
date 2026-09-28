@@ -15,22 +15,6 @@
       <p class="lesson" id="lesson-state" aria-live="polite"></p>
     </header>
 
-    <section class="today" aria-label="Today's plan">
-      <span class="label">Today:</span>
-      <ol id="stages">
-        <li data-stage="review">Review</li>
-        <li data-stage="new">New Words</li>
-        <li data-stage="conversation">Conversation</li>
-      </ol>
-    </section>
-
-    <button id="talk" class="talk" type="button" aria-pressed="false" data-state="idle">🎙 START TALKING</button>
-    <p class="mic-state" id="mic-state" data-state="idle">IDLE</p>
-    <p class="status" id="status" aria-live="polite">Press the button and the tutor will start.</p>
-    <p class="heard" id="heard" aria-live="polite" hidden></p>
-    <button id="retry" class="retry" type="button" hidden>↻ RETRY: send the same recording again</button>
-    <button id="mic-lang" class="mic-lang" type="button" aria-pressed="false" hidden></button>
-
     <section class="card" id="card" hidden aria-live="polite">
       <p class="position" id="card-position"></p>
       <p class="mandarin" id="card-mandarin" lang="zh-CN"></p>
@@ -40,23 +24,60 @@
       <p class="tag" id="card-tag" hidden></p>
     </section>
 
-    <section class="quick" aria-label="Quick commands">
-      <button type="button" data-say="Repeat">Repeat</button>
-      <button type="button" data-say="I forgot">I forgot</button>
-      <button type="button" data-say="I don't understand">I don't understand</button>
-      <button type="button" data-say="Let's continue">Let's continue</button>
-      <button type="button" data-say="Stop">End session</button>
+    <nav class="modes" aria-label="Choose how to learn">
+      <button id="mode-interactive" class="mode" type="button" aria-pressed="false">🎙 Interactive Practice</button>
+      <button id="mode-listen" class="mode" type="button" aria-pressed="false">🎧 Listen &amp; Learn</button>
+    </nav>
+    <p class="notice" id="notice" aria-live="polite" hidden></p>
+
+    <section id="interactive" aria-label="Interactive Practice" hidden>
+      <section class="today" aria-label="Today's plan">
+        <span class="label">Today:</span>
+        <ol id="stages">
+          <li data-stage="review">Review</li>
+          <li data-stage="new">New Words</li>
+          <li data-stage="conversation">Conversation</li>
+        </ol>
+      </section>
+
+      <button id="talk" class="talk" type="button" aria-pressed="false" data-state="idle">🎙 START TALKING</button>
+      <p class="mic-state" id="mic-state" data-state="idle">IDLE</p>
+      <p class="status" id="status" aria-live="polite">Press the button and the tutor will start.</p>
+      <p class="heard" id="heard" aria-live="polite" hidden></p>
+      <button id="retry" class="retry" type="button" hidden>↻ RETRY: send the same recording again</button>
+      <button id="mic-lang" class="mic-lang" type="button" aria-pressed="false" hidden></button>
+
+      <section class="quick" aria-label="Quick commands">
+        <button type="button" data-say="Repeat">Repeat</button>
+        <button type="button" data-say="I forgot">I forgot</button>
+        <button type="button" data-say="I don't understand">I don't understand</button>
+        <button type="button" data-say="Let's continue">Let's continue</button>
+        <button type="button" data-say="Stop">End session</button>
+      </section>
+
+      <section class="log" id="log" aria-label="Conversation"></section>
+
+      <details class="type-instead">
+        <summary>No microphone? Type instead</summary>
+        <form id="type-form">
+          <input id="type-input" autocomplete="off" placeholder="Type your answer">
+          <button type="submit">Send</button>
+        </form>
+      </details>
     </section>
 
-    <section class="log" id="log" aria-label="Conversation"></section>
-
-    <details class="type-instead">
-      <summary>No microphone? Type instead</summary>
-      <form id="type-form">
-        <input id="type-input" autocomplete="off" placeholder="Type your answer">
-        <button type="submit">Send</button>
-      </form>
-    </details>
+    <section id="listen" class="listen" aria-label="Listen and Learn" hidden>
+      <p class="listen-where" id="listen-where"></p>
+      <p class="listen-now" id="listen-now" aria-live="polite"></p>
+      <p class="listen-state" id="listen-state" data-state="idle"></p>
+      <div class="listen-controls">
+        <button id="listen-play" type="button">▶ Play</button>
+        <button id="listen-pause" type="button">⏸ Pause</button>
+        <button id="listen-repeat" type="button">↻ Repeat</button>
+        <button id="listen-next" type="button">→ Next</button>
+      </div>
+      <button id="listen-exit" class="listen-exit" type="button">Exit Listen Mode</button>
+    </section>
   </main>
   <script src="/app.js" type="module"></script>
 </body>

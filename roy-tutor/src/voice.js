@@ -296,23 +296,42 @@ export class SpeechStore {
     this.max = max;
     this.log = log;
     this.items = new Map();
+    this.byText = new Map(); // text -> audio job, so repeated lines are synthesised once
     this.next = 1;
+  }
+
+  // The audio job for a line of text: reused if this text was synthesised
+  // before (Listen & Learn repeats, the same word again); failures are retried.
+  #job(text) {
+    let job = this.byText.get(text);
+    if (!job) {
+      job = this.voice.synthesize(text);
+      this.byText.set(text, job);
+      job.catch(() => { if (this.byText.get(text) === job) this.byText.delete(text); });
+      while (this.byText.size > this.max * 3) this.byText.delete(this.byText.keys().next().value);
+    }
+    return job;
   }
 
   // Adds `audio` ids to a tutor result's spoken lines (a copy; the engine's
   // result is not changed).
   attach(result) {
-    if (!this.voice?.configured || !Array.isArray(result?.say)) return result;
-    const say = result.say.map((line) => {
+    return this.attachTo(result, 'say');
+  }
+
+  // Same, for any list of spoken lines (Listen & Learn uses `steps`).
+  attachTo(result, field) {
+    if (!this.voice?.configured || !Array.isArray(result?.[field])) return result;
+    const lines = result[field].map((line) => {
       if (!String(line.text ?? '').trim()) return line;
       const id = `${Date.now().toString(36)}${(this.next++).toString(36)}`;
-      const job = this.voice.synthesize(line.text);
+      const job = this.#job(line.text);
       job.catch((err) => this.log(`[voice] TTS failed for line ${id}: ${err.message}${err.detail ? ` ${err.detail}` : ''}`));
       this.items.set(id, job);
       while (this.items.size > this.max) this.items.delete(this.items.keys().next().value);
       return { ...line, audio: id };
     });
-    return { ...result, say };
+    return { ...result, [field]: lines };
   }
 
   get(id) {

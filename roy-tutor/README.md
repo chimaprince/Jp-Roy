@@ -237,12 +237,57 @@ If TTS fails, the teacher's text is shown in the conversation and the lesson
 carries on. The browser's built-in speech recognition and speech voices are not
 used at all.
 
-**Word recognition vs pronunciation.** Qwen ASR gives text, not a score. The server reports to the teacher whether the recogniser wrote
-down the expected characters (`src/recognition.js`). That is word recognition,
-not a pronunciation or tone score, and the teacher is told never to judge tones
-from it. `assessPronunciation()` in `src/recognition.js` is the hook for real
-audio-based scoring later; today it returns nothing, and the teacher says it
-can't reliably judge tones yet.
+**The transcript is evidence, not ground truth.** Chinese has many characters
+with the same sound, so the recogniser sometimes writes the wrong one even when
+Roy says the word correctly (a real case: 硬膜外 said correctly, transcribed as
+硬磨外, since 磨 is also mó). `src/evaluation.js` compares the transcript with
+the current term **sound by sound**, using the curriculum pinyin and a
+dictionary of character readings (`pinyin-pro`). It finds the term even inside a
+longer answer and gives one of four levels:
+
+| Level | Meaning | What happens |
+|---|---|---|
+| `high_confidence_correct` | exactly the expected characters | counted as correct |
+| `likely_correct_asr_character_mismatch` | every syllable has the same sound and tone; only the characters differ | the teacher says it heard the word and points out the character in the term (for example "The recogniser wrote 磨, but the character in our medical term is 膜"); **never counted as a mistake** |
+| `uncertain` | a tone differs, a commonly confused sound (zh/z, n/l, in/ing…), one syllable of a longer term, or pinyin letters only | the teacher says it didn't quite catch it and asks again; no verdict is forced |
+| `clearly_incorrect` | the expected sounds are missing | **never marked correct**, even if the AI teacher says so |
+
+The teacher is told to keep "your pronunciation" apart from "what the
+recogniser transcribed". The two engine rules (in the table) apply to the
+say-the-term and review exercises. If the teacher's reply contradicts the
+evidence, it is asked once more, and the lesson state follows the evidence either
+way. In sentences and role-play the evaluation only says whether the term was
+used. Typed answers are taken as typed. This is still not a tone score: with
+audio only through a transcript, tones cannot be judged directly.
+`assessPronunciation()` in `src/recognition.js` remains the hook for real
+audio-based scoring later.
+
+## Listen & Learn
+
+The home screen shows Roy's current word and two buttons: **🎙 Interactive
+Practice** (the voice lessons above) and **🎧 Listen & Learn**. In Listen & Learn
+Roy only listens. Nothing is asked, the microphone is never used, and no
+progress changes. For each word the Qwen voice:
+
+1. says the Mandarin term clearly;
+2. says it again, slowly, with the **pinyin shown on screen** (pinyin is never
+   sent to the voice; a Mandarin voice reads characters, not letters);
+3. gives the English;
+4. reads the JH Medics medical meaning, verbatim;
+5. goes syllable by syllable, shown as `硬 yìng · 膜 mó · 外 wài`, but only
+   when every character has a single reading, so the voice cannot choose a
+   wrong one;
+6. says the term once more.
+
+JH Medics Volume 1 has no example sentences, so there is no sentence step and
+none is invented. Sentences are practised in Interactive Practice.
+
+Controls: **▶ Play**, **⏸ Pause**, **↻ Repeat** (this step again, or the whole
+word once finished), **→ Next** (the next word in book order), and **Exit
+Listen Mode**. Listening to later words is only a preview: Roy's place in the
+curriculum moves only by completing words in Interactive Practice. The lesson
+comes from `GET /api/listen?position=N` (read-only). Each line is synthesised
+once and reused on repeats, to save TTS quota.
 
 Typing (the "type instead" box) is a fallback. Typed answers go to the same AI
 teacher, marked as typed, and no pronunciation is claimed for them.
@@ -277,7 +322,9 @@ server.js              HTTP server and JSON API
 src/tutor.js           tutor engine: lesson state, order, review, jumps, progress
 src/teacher.js         the AI teacher (Qwen, server side only)
 src/voice.js           Qwen speech recognition and teacher voice (server side only)
-src/recognition.js     word recognition from the transcript; pronunciation hook
+src/recognition.js     pinyin helpers; pronunciation-scoring hook
+src/evaluation.js      ASR-aware answer evaluation (same sound vs same character)
+src/listen.js          Listen & Learn lesson script from the curriculum
 src/intents.js         resolves a jump target to a curriculum entry
 src/match.js           text normalisation helpers
 src/db.js              SQLite schema and queries

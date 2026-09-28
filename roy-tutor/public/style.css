@@ -108,3 +108,26 @@ h1 { margin: 0; font-size: 1.5rem; letter-spacing: 0.06em; }
   font: inherit; font-weight: 600; cursor: pointer;
 }
 [hidden] { display: none !important; }
+
+.modes { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 16px 0 8px; }
+.mode {
+  padding: 18px 10px; font: inherit; font-size: 1.05rem; font-weight: 700;
+  border: 2px solid var(--accent); border-radius: 16px; cursor: pointer;
+  background: var(--surface); color: var(--text);
+}
+.mode[aria-pressed="true"] { background: var(--accent); color: var(--accent-text); }
+.notice { text-align: center; color: var(--warn); margin: 4px 0 12px; }
+.card { margin-top: 16px; }
+
+.listen { text-align: center; margin-top: 8px; }
+.listen-where { color: var(--muted); margin: 8px 0; }
+.listen-now { font-size: 1.6rem; line-height: 1.4; min-height: 3.2em; margin: 12px 0; overflow-wrap: anywhere; }
+.listen-now.zh { font-size: 2.4rem; }
+.listen-state { color: var(--muted); min-height: 1.5em; }
+.listen-controls { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 12px 0; }
+.listen-controls button, .listen-exit {
+  padding: 16px 4px; font: inherit; font-weight: 700; border-radius: 12px; cursor: pointer;
+  border: 1px solid var(--line); background: var(--surface); color: var(--text);
+}
+.listen-controls button:disabled { opacity: 0.4; cursor: default; }
+.listen-exit { width: 100%; margin-top: 8px; font-weight: 600; color: var(--muted); }

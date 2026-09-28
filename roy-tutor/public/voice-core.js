@@ -209,3 +209,129 @@ export function playbackRate(seg) {
   const r = Number(seg?.rate);
   return Number.isFinite(r) && r > 0 && r < 1 ? Math.max(0.7, r) : 1;
 }
+
+// ---------- Listen & Learn ----------
+//
+// Plays one word's lesson step by step, with Play / Pause / Repeat / Next.
+// No microphone, no answers: Roy only listens. The page supplies:
+//   playStep(step)  plays one step's audio; resolves when it ends
+//                   (rejects if the audio failed: the text stays on screen and
+//                   the lesson moves on)
+//   stopAudio()     stops whatever is playing
+//   loadLesson(position) fetches the lesson for a word
+//   onChange(view)  redraw
+// States: idle (nothing loaded), loading, playing, paused, finished.
+
+export class ListenController {
+  constructor({ playStep, stopAudio = () => {}, loadLesson, onChange = () => {}, onError = () => {} }) {
+    Object.assign(this, { playStep, stopAudio, loadLesson, onChange, onError });
+    this.lesson = null;
+    this.index = 0;
+    this.state = 'idle';
+    this.run = 0; // bumps to cancel a playing sequence
+    this.failedSteps = 0;
+  }
+
+  get view() {
+    const steps = this.lesson?.steps ?? [];
+    return {
+      state: this.state,
+      position: this.lesson?.position ?? null,
+      total: this.lesson?.total ?? null,
+      index: this.index,
+      steps: steps.length,
+      step: steps[Math.min(this.index, steps.length - 1)] ?? null,
+      canNext: Boolean(this.lesson && this.lesson.position < this.lesson.total),
+    };
+  }
+
+  #set(state) {
+    this.state = state;
+    this.onChange(this.view);
+  }
+
+  async open(position) {
+    const run = ++this.run;
+    this.stopAudio();
+    this.#set('loading');
+    let lesson;
+    try {
+      lesson = await this.loadLesson(position);
+    } catch (err) {
+      if (run === this.run) { this.#set(this.lesson ? 'paused' : 'idle'); this.onError(err); }
+      return;
+    }
+    if (run !== this.run) return;
+    this.lesson = lesson;
+    this.index = 0;
+    this.failedSteps = 0;
+    await this.#playFrom(run);
+  }
+
+  async #playFrom(run) {
+    this.#set('playing');
+    while (run === this.run && this.index < this.lesson.steps.length) {
+      try {
+        await this.playStep(this.lesson.steps[this.index]);
+      } catch (err) {
+        if (run !== this.run) return;
+        this.failedSteps += 1;
+        this.onError(err);
+      }
+      if (run !== this.run) return;
+      this.index += 1;
+      if (this.index < this.lesson.steps.length) this.onChange(this.view);
+    }
+    if (run === this.run) {
+      this.index = this.lesson.steps.length - 1;
+      this.#set('finished');
+    }
+  }
+
+  // Play: start the current word, resume after Pause (from the start of the
+  // step that was interrupted), or play the word again once finished.
+  play() {
+    if (!this.lesson) return this.open(undefined);
+    if (this.state === 'playing' || this.state === 'loading') return undefined;
+    if (this.state === 'finished') this.index = 0;
+    return this.#playFrom(++this.run);
+  }
+
+  pause() {
+    if (this.state !== 'playing') return;
+    this.run += 1;
+    this.stopAudio();
+    this.#set('paused');
+  }
+
+  // Repeat: the step on screen again (or the whole word once it has finished).
+  repeat() {
+    if (!this.lesson) return undefined;
+    this.run += 1;
+    this.stopAudio();
+    if (this.state === 'finished') this.index = 0;
+    return this.#playFrom(this.run);
+  }
+
+  // Next: the next word in curriculum order (never skips ahead).
+  next() {
+    if (!this.lesson || this.lesson.position >= this.lesson.total) return undefined;
+    return this.open(this.lesson.position + 1);
+  }
+
+  exit() {
+    this.run += 1;
+    this.stopAudio();
+    this.lesson = null;
+    this.index = 0;
+    this.#set('idle');
+  }
+}
+
+export const LISTEN_STATE_TEXT = {
+  idle: '',
+  loading: 'Preparing the lesson…',
+  playing: 'Playing',
+  paused: 'Paused',
+  finished: 'Finished this word. ↻ Repeat to hear it again, or → Next for the next word.',
+};

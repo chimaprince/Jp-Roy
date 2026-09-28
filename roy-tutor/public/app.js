@@ -12,7 +12,7 @@
 import {
   recognitionLang, LANGUAGE_LABEL, otherLanguage, lessonStateText, friendlyError, VOICE_ERRORS,
   STATES, BUSY_STATES, pickRecorderType, uploadType, toMono, resample, encodeWav, silentWav,
-  SilenceDetector, rms, lineText, playbackRate,
+  SilenceDetector, rms, lineText, playbackRate, ListenController, LISTEN_STATE_TEXT,
 } from './voice-core.js';
 
 const $ = (id) => document.getElementById(id);
@@ -547,10 +547,126 @@ if (!window.isSecureContext) {
   document.querySelector('.type-instead').open = true;
   setStatus(VOICE_ERRORS.unsupported);
 }
+// ---------- choosing a mode: Interactive Practice or Listen & Learn ----------
+
+let learnMode = null; // null (home), 'interactive' or 'listen'
+let curriculumPosition = null;
+
+function notice(text) {
+  $('notice').textContent = text || '';
+  $('notice').hidden = !text;
+}
+
+function showMode(next) {
+  learnMode = next;
+  $('interactive').hidden = next !== 'interactive';
+  $('listen').hidden = next !== 'listen';
+  $('mode-interactive').setAttribute('aria-pressed', String(next === 'interactive'));
+  $('mode-listen').setAttribute('aria-pressed', String(next === 'listen'));
+  $('stages').closest('.today').hidden = next !== 'interactive';
+}
+
+// The word card for a curriculum position (text only, no audio).
+async function showWord(position) {
+  try {
+    const lesson = await api('GET', `/api/listen?audio=0${position ? `&position=${position}` : ''}`);
+    renderView({ card: lesson.card, stage: null });
+  } catch (err) {
+    notice(friendlyError(err));
+  }
+}
+
+// Stop everything Interactive Practice is doing (the microphone is released).
+function leaveInteractive() {
+  stopListening();
+  stopSpeaking();
+  releaseMic();
+  setState('idle');
+}
+
+$('mode-interactive').addEventListener('click', () => {
+  unlockAudio();
+  if (learnMode === 'listen') listenPlayer.exit();
+  showMode('interactive');
+  if (!sessionOpen && !BUSY_STATES.has(state)) startSession();
+});
+
+$('mode-listen').addEventListener('click', () => {
+  unlockAudio(); // this tap lets iPhone Safari play the lesson audio
+  leaveInteractive();
+  showMode('listen');
+  listenPlayer.open(listenPlayer.view.position ?? curriculumPosition ?? 1);
+});
+
+// ---------- Listen & Learn: Qwen TTS lessons, no microphone ----------
+
+async function playListenStep(step) {
+  const run = speechRun;
+  if (!step.audio) {
+    // No teacher voice (TTS not configured or failed): show the text long enough to read.
+    await new Promise((resolve) => setTimeout(resolve, 1500 + String(step.show || step.text).length * 60));
+    return;
+  }
+  const url = await fetchAudio(step.audio);
+  if (run !== speechRun) { URL.revokeObjectURL(url); return; } // paused while the audio was loading
+  try {
+    await playUrl(url, playbackRate(step), run);
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+const listenPlayer = new ListenController({
+  playStep: playListenStep,
+  stopAudio: stopSpeaking,
+  loadLesson: (position) => api('GET', `/api/listen${position ? `?position=${position}` : ''}`),
+  onChange: renderListen,
+  onError: (err) => {
+    console.error('[listen]', err);
+    if (err?.code === 'play-blocked') { listenPlayer.pause(); notice(VOICE_ERRORS['play-blocked']); }
+  },
+});
+
+function renderListen(view) {
+  const lesson = listenPlayer.lesson;
+  if (lesson) {
+    renderView({ card: lesson.card, stage: null });
+    const place = lesson.curriculumPosition && lesson.curriculumPosition !== lesson.position ? ` · your place: Word ${lesson.curriculumPosition}` : '';
+    $('listen-where').textContent = `Listening: Word ${lesson.position} of ${lesson.total}${place}`;
+  }
+  const step = view.step;
+  const nowEl = $('listen-now');
+  nowEl.textContent = step ? step.show || step.text : '';
+  nowEl.classList.toggle('zh', step?.lang === 'zh');
+  nowEl.lang = step?.lang === 'zh' ? 'zh-CN' : 'en';
+  $('listen-state').dataset.state = view.state;
+  $('listen-state').textContent = view.state === 'playing' && view.steps ? `Playing ${view.index + 1} of ${view.steps}` : LISTEN_STATE_TEXT[view.state];
+  $('listen-play').disabled = view.state === 'playing' || view.state === 'loading';
+  $('listen-pause').disabled = view.state !== 'playing';
+  $('listen-repeat').disabled = !lesson || view.state === 'loading';
+  $('listen-next').disabled = !view.canNext || view.state === 'loading';
+}
+
+$('listen-play').addEventListener('click', () => { unlockAudio(); notice(''); listenPlayer.play(); });
+$('listen-pause').addEventListener('click', () => listenPlayer.pause());
+$('listen-repeat').addEventListener('click', () => { unlockAudio(); listenPlayer.repeat(); });
+$('listen-next').addEventListener('click', () => { unlockAudio(); listenPlayer.next(); });
+$('listen-exit').addEventListener('click', () => {
+  listenPlayer.exit();
+  showMode(null);
+  notice('');
+  showWord(curriculumPosition); // back to Roy's own place
+});
+
+showMode(null);
 api('GET', '/api/status').then((s) => {
   renderStatus(s);
+  curriculumPosition = s.finished ? s.total : s.position ?? null;
   if (s.session) renderView(s.session);
+  else showWord(curriculumPosition);
   if (s.aiConfigured === false) {
-    setStatus('Qwen is not configured: DASHSCOPE_API_KEY is missing. Set it in roy-tutor/.env on the server and restart the server.');
+    const msg = 'Qwen is not configured: DASHSCOPE_API_KEY is missing. Set it in roy-tutor/.env on the server and restart the server.';
+    setStatus(msg);
+    notice(msg);
   }
-}).catch((err) => setStatus(friendlyError(err)));
+}).catch((err) => { setStatus(friendlyError(err)); notice(friendlyError(err)); });
