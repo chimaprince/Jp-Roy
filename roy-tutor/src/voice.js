@@ -4,15 +4,22 @@
 //
 //   ASR  qwen3-asr-flash, OpenAI-compatible chat completions with an
 //        input_audio part (Singapore: dashscope-intl.aliyuncs.com).
-//   TTS  qwen3-tts-flash, DashScope multimodal-generation endpoint. Qwen
+//   TTS  qwen3-tts-instruct-flash, DashScope multimodal-generation endpoint
+//        (Singapore), with speaking-style instructions for a clear, patient
+//        Mandarin teacher. Qwen
 //        returns a short-lived audio URL (or inline data); the server fetches
 //        it and relays the bytes, so the browser never sees Qwen URLs.
 
 export const ASR_DEFAULT_MODEL = 'qwen3-asr-flash';
 export const ASR_DEFAULT_BASE_URL = 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1';
-export const TTS_DEFAULT_MODEL = 'qwen3-tts-flash';
+export const TTS_DEFAULT_MODEL = 'qwen3-tts-instruct-flash';
 export const TTS_DEFAULT_URL = 'https://dashscope-intl.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation';
 export const TTS_DEFAULT_VOICE = 'Cherry';
+// Speaking style for lines with Mandarin in them (sent as `instructions`):
+// standard Putonghua, every tone clear, a little slower than conversation,
+// like a patient medical Chinese teacher modelling pronunciation.
+export const TTS_DEFAULT_INSTRUCTIONS_ZH = '请用标准普通话朗读，发音清晰准确，每个字的声调都要读清楚，语速适中偏慢，语气亲切、耐心、专业，像一位医学中文老师在给学生示范发音。句子里的英文单词用自然的英语读出。';
+export const TTS_DEFAULT_INSTRUCTIONS_EN = 'Speak clear, natural English at a moderate pace, in a warm, patient and professional tone, like a medical Chinese teacher talking to a student.';
 
 // Base64 audio must stay under Qwen's 10 MB data-URL limit.
 export const MAX_AUDIO_BYTES = 7 * 1024 * 1024;
@@ -27,14 +34,17 @@ export function voiceSettings(env = process.env) {
     ttsModel: env.QWEN_TTS_MODEL || TTS_DEFAULT_MODEL,
     ttsURL: env.QWEN_TTS_URL || TTS_DEFAULT_URL,
     ttsVoice: env.QWEN_TTS_VOICE || TTS_DEFAULT_VOICE,
+    ttsInstructionsZh: env.QWEN_TTS_INSTRUCTIONS || TTS_DEFAULT_INSTRUCTIONS_ZH,
+    ttsInstructionsEn: env.QWEN_TTS_INSTRUCTIONS_EN || TTS_DEFAULT_INSTRUCTIONS_EN,
   };
 }
 
 export class VoiceError extends Error {
-  constructor(code, message, { status = 502, detail } = {}) {
+  constructor(code, message, { status = 502, detail, httpStatus = null } = {}) {
     super(message);
     this.code = code;
     this.status = status;
+    this.httpStatus = httpStatus; // Qwen's HTTP status, if Qwen answered
     this.detail = detail; // server log only, never sent to the browser
   }
 }
@@ -76,6 +86,29 @@ export function parseTtsReply(reply) {
   return {};
 }
 
+// What a browser needs to know to play the audio: container, encoding and
+// length. Returns null for anything that is not WAV or MP3.
+export function audioInfo(buf) {
+  if (!buf?.length) return null;
+  if (buf.length >= 44 && buf.toString('ascii', 0, 4) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WAVE') {
+    let off = 12;
+    let fmt = null;
+    let dataBytes = null;
+    while (off + 8 <= buf.length) {
+      const id = buf.toString('ascii', off, off + 4);
+      const size = buf.readUInt32LE(off + 4);
+      if (id === 'fmt ') fmt = { format: buf.readUInt16LE(off + 8), channels: buf.readUInt16LE(off + 10), sampleRate: buf.readUInt32LE(off + 12), bits: buf.readUInt16LE(off + 22) };
+      if (id === 'data') { dataBytes = Math.min(size, buf.length - off - 8); break; }
+      off += 8 + size + (size % 2);
+    }
+    if (!fmt || dataBytes === null) return null;
+    const bytesPerSecond = fmt.sampleRate * fmt.channels * (fmt.bits / 8);
+    return { container: 'wav', encoding: fmt.format === 1 ? 'pcm' : `format ${fmt.format}`, ...fmt, seconds: bytesPerSecond ? dataBytes / bytesPerSecond : 0 };
+  }
+  if (buf.toString('ascii', 0, 3) === 'ID3' || (buf[0] === 0xff && (buf[1] & 0xe0) === 0xe0)) return { container: 'mp3', encoding: 'mp3', seconds: null };
+  return null;
+}
+
 function mimeFromBytes(buf) {
   if (buf.length >= 12 && buf.toString('ascii', 0, 4) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WAVE') return 'audio/wav';
   if (buf.length >= 3 && (buf.toString('ascii', 0, 3) === 'ID3' || (buf[0] === 0xff && (buf[1] & 0xe0) === 0xe0))) return 'audio/mpeg';
@@ -84,7 +117,7 @@ function mimeFromBytes(buf) {
 
 export function createVoice({ env = process.env, fetchImpl = fetch, log = console.log } = {}) {
   const s = voiceSettings(env);
-  const info = { asrModel: s.asrModel, asrBaseURL: s.asrBaseURL, ttsModel: s.ttsModel, ttsURL: s.ttsURL, ttsVoice: s.ttsVoice };
+  const info = { asrModel: s.asrModel, asrBaseURL: s.asrBaseURL, ttsModel: s.ttsModel, ttsURL: s.ttsURL, ttsVoice: s.ttsVoice, ttsInstructions: s.ttsInstructionsZh };
   const configured = Boolean(s.apiKey);
 
   async function call(url, init, what) {
@@ -129,17 +162,18 @@ export function createVoice({ env = process.env, fetchImpl = fetch, log = consol
       return { text: out.text, language: lang, detectedLanguage: out.detectedLanguage, model: s.asrModel };
     },
 
-    // One spoken line → { audio: Buffer, mime }.
+    // One spoken line → { audio: Buffer, mime, status } (status: Qwen's HTTP status).
     async synthesize(text) {
       const headers = requireKey('tts');
       const clean = String(text ?? '').trim().slice(0, MAX_TTS_CHARS);
       if (!clean) throw new VoiceError('tts_failed', 'Nothing to say.', { status: 400 });
       const language = ttsLanguage(clean);
-      const body = { model: s.ttsModel, input: { text: clean, voice: s.ttsVoice, language_type: language } };
+      const instructions = language === 'Chinese' ? s.ttsInstructionsZh : s.ttsInstructionsEn;
+      const body = { model: s.ttsModel, input: { text: clean, voice: s.ttsVoice, language_type: language, instructions, optimize_instructions: false } };
       log(`[voice] -> Qwen TTS model=${s.ttsModel} voice=${s.ttsVoice} language=${language} ${clean.length} chars`);
       const res = await call(s.ttsURL, { method: 'POST', headers, body: JSON.stringify(body) }, 'tts');
       const raw = await res.text();
-      if (!res.ok) throw new VoiceError('tts_failed', `Qwen speech synthesis failed (status ${res.status}).`, { detail: raw.slice(0, 500) });
+      if (!res.ok) throw new VoiceError('tts_failed', `Qwen speech synthesis failed (status ${res.status}).`, { detail: raw.slice(0, 500), httpStatus: res.status });
       let reply;
       try { reply = JSON.parse(raw); } catch { throw new VoiceError('tts_failed', 'Qwen speech synthesis sent an unreadable reply.', { detail: raw.slice(0, 500) }); }
       const found = parseTtsReply(reply);
@@ -152,7 +186,7 @@ export function createVoice({ env = process.env, fetchImpl = fetch, log = consol
       }
       if (!audio?.length) throw new VoiceError('tts_failed', 'Qwen speech synthesis returned no audio.', { detail: raw.slice(0, 500) });
       log(`[voice] <- Qwen TTS ${audio.length} bytes`);
-      return { audio, mime: mimeFromBytes(audio) };
+      return { audio, mime: mimeFromBytes(audio), status: res.status };
     },
   };
 }

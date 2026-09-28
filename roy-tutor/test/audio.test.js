@@ -1,4 +1,4 @@
-// Server-side voice: Qwen ASR (qwen3-asr-flash) and Qwen TTS (qwen3-tts-flash).
+// Server-side voice: Qwen ASR (qwen3-asr-flash) and Qwen TTS (qwen3-tts-instruct-flash).
 // Real Qwen is replaced by a local stand-in server that checks every request
 // the tutor makes, so these tests run offline.
 import { test } from 'node:test';
@@ -12,7 +12,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   createVoice, voiceSettings, SpeechStore, parseAsrReply, parseTtsReply, asrLanguage, ttsLanguage, audioMime,
-  ASR_DEFAULT_MODEL, ASR_DEFAULT_BASE_URL, TTS_DEFAULT_MODEL, TTS_DEFAULT_URL,
+  ASR_DEFAULT_MODEL, ASR_DEFAULT_BASE_URL, TTS_DEFAULT_MODEL, TTS_DEFAULT_URL, TTS_DEFAULT_INSTRUCTIONS_ZH, TTS_DEFAULT_INSTRUCTIONS_EN, audioInfo,
 } from '../src/voice.js';
 import {
   encodeWav, resample, toMono, SilenceDetector, rms, pickRecorderType, uploadType, playbackRate, STATES, BUSY_STATES, silentWav,
@@ -117,16 +117,16 @@ function fakeFetch(handler) {
 const WAV = Buffer.from(encodeWav(new Float32Array(1600).fill(0.1), 16000));
 const quiet = () => {};
 
-test('defaults: qwen3-asr-flash and qwen3-tts-flash on the Singapore endpoint', () => {
+test('defaults: qwen3-asr-flash and qwen3-tts-instruct-flash on the Singapore endpoint', () => {
   const s = voiceSettings({ DASHSCOPE_API_KEY: KEY });
   assert.equal(s.asrModel, 'qwen3-asr-flash');
-  assert.equal(s.ttsModel, 'qwen3-tts-flash');
+  assert.equal(s.ttsModel, 'qwen3-tts-instruct-flash');
   assert.equal(ASR_DEFAULT_BASE_URL, 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1');
   assert.equal(TTS_DEFAULT_URL, 'https://dashscope-intl.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation');
   assert.equal(s.asrBaseURL, ASR_DEFAULT_BASE_URL);
   assert.equal(s.ttsURL, TTS_DEFAULT_URL);
   assert.equal(ASR_DEFAULT_MODEL, 'qwen3-asr-flash');
-  assert.equal(TTS_DEFAULT_MODEL, 'qwen3-tts-flash');
+  assert.equal(TTS_DEFAULT_MODEL, 'qwen3-tts-instruct-flash');
   const custom = voiceSettings({ QWEN_ASR_MODEL: 'a', QWEN_TTS_MODEL: 'b', QWEN_TTS_VOICE: 'Ethan', QWEN_ASR_BASE_URL: 'http://x/v1/', QWEN_TTS_URL: 'http://y' });
   assert.deepEqual([custom.asrModel, custom.ttsModel, custom.ttsVoice, custom.asrBaseURL, custom.ttsURL], ['a', 'b', 'Ethan', 'http://x/v1', 'http://y']);
 });
@@ -181,7 +181,13 @@ test('TTS request: Chinese mode for lines with Mandarin, the audio URL is downlo
   assert.deepEqual(out.audio, WAV);
   assert.equal(calls[0].url, TTS_DEFAULT_URL);
   assert.equal(calls[0].headers.Authorization, `Bearer ${KEY}`);
-  assert.deepEqual(calls[0].body, { model: 'qwen3-tts-flash', input: { text: 'The word is 硬膜外, yìng mó wài.', voice: 'Cherry', language_type: 'Chinese' } });
+  assert.deepEqual(calls[0].body, {
+    model: 'qwen3-tts-instruct-flash',
+    input: { text: 'The word is 硬膜外, yìng mó wài.', voice: 'Cherry', language_type: 'Chinese', instructions: TTS_DEFAULT_INSTRUCTIONS_ZH, optimize_instructions: false },
+  });
+  assert.match(TTS_DEFAULT_INSTRUCTIONS_ZH, /标准普通话/);
+  assert.match(TTS_DEFAULT_INSTRUCTIONS_ZH, /声调/);
+  assert.equal(out.status, 200, 'the HTTP status is reported');
   assert.equal(calls[1].url, 'https://example-oss.test/tts/abc.wav');
   assert.equal(calls[1].headers.Authorization, undefined, 'the key is not sent to the download link');
   assert.equal(ttsLanguage('Say it again.'), 'English');
@@ -190,7 +196,32 @@ test('TTS request: Chinese mode for lines with Mandarin, the audio URL is downlo
   assert.deepEqual(parseTtsReply({ output: { audio: { data: WAV.toString('base64') } } }).data, WAV);
 });
 
-test('TTS failures are reported as tts_failed', async () => {
+test('English-only lines use the English speaking style; instructions can be set in .env', async () => {
+  const { fn, calls } = fakeFetch(() => ({ json: { output: { audio: { data: WAV.toString('base64') } } } }));
+  await createVoice({ env: { DASHSCOPE_API_KEY: KEY }, fetchImpl: fn, log: quiet }).synthesize('Say it again, slowly.');
+  assert.equal(calls[0].body.input.language_type, 'English');
+  assert.equal(calls[0].body.input.instructions, TTS_DEFAULT_INSTRUCTIONS_EN);
+  const custom = createVoice({ env: { DASHSCOPE_API_KEY: KEY, QWEN_TTS_INSTRUCTIONS: '慢一点', QWEN_TTS_MODEL: 'qwen3-tts-flash', QWEN_TTS_VOICE: 'Serena' }, fetchImpl: fn, log: quiet });
+  await custom.synthesize('硬膜外');
+  assert.equal(calls[1].body.input.instructions, '慢一点');
+  assert.equal(calls[1].body.model, 'qwen3-tts-flash');
+  assert.equal(calls[1].body.input.voice, 'Serena');
+});
+
+test('playable audio: PCM WAV and MP3 are recognised, anything else is not', () => {
+  const info = audioInfo(WAV);
+  assert.equal(info.container, 'wav');
+  assert.equal(info.encoding, 'pcm');
+  assert.equal(info.sampleRate, 16000);
+  assert.ok(Math.abs(info.seconds - 0.1) < 1e-6);
+  assert.equal(audioInfo(Buffer.from('ID3\x04rest')).container, 'mp3');
+  assert.equal(audioInfo(Buffer.from('{"error":"x"}')), null);
+  assert.equal(audioInfo(Buffer.alloc(0)), null);
+});
+
+test('TTS failures are reported as tts_failed, with Qwen\'s HTTP status (e.g. 403 AccessDenied.Unpurchased)', async () => {
+  const denied = createVoice({ env: { DASHSCOPE_API_KEY: KEY }, fetchImpl: fakeFetch(() => ({ status: 403, json: { code: 'AccessDenied.Unpurchased', message: 'Access to model denied.' } })).fn, log: quiet });
+  await assert.rejects(denied.synthesize('你好'), (e) => e.code === 'tts_failed' && e.httpStatus === 403 && /Unpurchased/.test(e.detail) && e.status === 502);
   const bad = createVoice({ env: { DASHSCOPE_API_KEY: KEY }, fetchImpl: fakeFetch(() => ({ status: 400, json: { code: 'InvalidParameter' } })).fn, log: quiet });
   await assert.rejects(bad.synthesize('你好'), (e) => e.code === 'tts_failed');
   const empty = createVoice({ env: { DASHSCOPE_API_KEY: KEY }, fetchImpl: fakeFetch(() => ({ json: { output: {} } })).fn, log: quiet });
@@ -322,7 +353,7 @@ test('end to end: recording → Qwen ASR → tutor engine → Qwen TTS audio, ke
     assert.equal(audio.status, 200);
     assert.equal(audio.headers.get('content-type'), 'audio/wav');
     assert.deepEqual(Buffer.from(await audio.arrayBuffer()), WAV);
-    assert.ok(qwen.seen.tts.some((b) => b.input.text.includes('硬膜外') && b.input.language_type === 'Chinese' && b.model === 'qwen3-tts-flash'));
+    assert.ok(qwen.seen.tts.some((b) => b.input.text.includes('硬膜外') && b.input.language_type === 'Chinese' && b.model === 'qwen3-tts-instruct-flash' && /普通话/.test(b.input.instructions)));
     assert.ok(qwen.seen.downloads >= 1);
 
     // Roy's recording goes up; Qwen ASR returns the transcript.
@@ -363,7 +394,7 @@ test('end to end: recording → Qwen ASR → tutor engine → Qwen TTS audio, ke
     for (const text of everything) assert.ok(!text.includes(KEY) && !/DASHSCOPE_API_KEY=|Authorization|Bearer/.test(text), 'no key in anything the browser receives');
     assert.ok(!s.output().includes(KEY), 'the key is not printed');
     assert.match(s.output(), /speech recognition: Qwen qwen3-asr-flash/);
-    assert.match(s.output(), /teacher voice: Qwen qwen3-tts-flash/);
+    assert.match(s.output(), /teacher voice: Qwen qwen3-tts-instruct-flash/);
   } finally {
     await s.stop();
     await qwen.close();

@@ -35,9 +35,11 @@ Open the page in any current browser (Chrome, Edge, Safari, iPhone Safari). Pres
 | `QWEN_ENABLE_THINKING` | Default `false` (faster replies for voice). |
 | `QWEN_ASR_MODEL` | Speech recognition model. Default `qwen3-asr-flash`. |
 | `QWEN_ASR_BASE_URL` | Default `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` (Singapore). |
-| `QWEN_TTS_MODEL` | Teacher voice model. Default `qwen3-tts-flash`. |
+| `QWEN_TTS_MODEL` | Teacher voice model. Default `qwen3-tts-instruct-flash`. |
 | `QWEN_TTS_URL` | Default `https://dashscope-intl.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation` (Singapore). |
 | `QWEN_TTS_VOICE` | Default `Cherry` (speaks Mandarin and English). |
+| `QWEN_TTS_INSTRUCTIONS` | Speaking style for lines with Mandarin. Default: standard Putonghua, clear tones, slightly slow, patient medical-teacher tone (see `src/voice.js`). |
+| `QWEN_TTS_INSTRUCTIONS_EN` | Speaking style for English-only lines. |
 | `TUTOR_ACCESS_CODE` | Optional passcode. The browser asks for it once. Set it when the app is on the internet. |
 | `TUTOR_TIMEZONE` | Roy's time zone (for example `Asia/Shanghai`), used to decide when a new study day starts. |
 | `TUTOR_DB` | SQLite file path, default `roy-tutor/tutor.db`. |
@@ -166,8 +168,9 @@ the same recording again. If no words were recognised, Roy is asked to say it
 again.
 
 **Speech out (Qwen TTS).** Each line of the teacher's reply is sent by the
-server to **qwen3-tts-flash** (voice `Cherry`, Chinese mode for any line with
-Mandarin in it) as soon as the teacher has answered. The page fetches the audio
+server to **qwen3-tts-instruct-flash** (voice `Cherry`, Chinese mode for any line with
+Mandarin in it, with instructions to speak standard Putonghua clearly, tones distinct,
+a little slowly, like a patient medical Chinese teacher) as soon as the teacher has answered. The page fetches the audio
 from `GET /api/voice/speech/<id>` and plays it. Only lines the tutor itself
 produced can be spoken; the page cannot ask the server to say arbitrary text.
 If TTS fails, the teacher's text is shown in the conversation and the lesson
