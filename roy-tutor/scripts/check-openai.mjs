@@ -1,15 +1,19 @@
-// Connectivity check for the OpenAI API, from the same Node and .env the server uses.
-//   npm run check-openai
+// Connectivity check for the configured AI provider (Qwen or OpenAI), from the
+// same Node and .env the server uses.
+//   npm run check-ai
 // Tests each layer on its own (DNS, TCP, TLS, HTTPS, API key, model) and prints
 // which problem it is. Never prints the API key.
 import '../src/env.js';
 import dns from 'node:dns/promises';
 import net from 'node:net';
 import tls from 'node:tls';
+import { providerSettings } from '../src/teacher.js';
 
-const HOST = 'api.openai.com';
-const KEY = process.env.OPENAI_API_KEY || '';
-const MODEL = process.env.OPENAI_MODEL || 'gpt-5.5';
+const P = providerSettings();
+const BASE = (P.baseURL || 'https://api.openai.com/v1').replace(/\/$/, '');
+const HOST = new URL(BASE).hostname;
+const KEY = P.apiKey;
+const MODEL = P.model;
 const TIMEOUT = 10000;
 
 const redact = (s) => String(s ?? '').replace(/sk-[A-Za-z0-9_\-*.]{4,}/g, 'sk-[redacted]').slice(0, 600);
@@ -40,8 +44,9 @@ async function main() {
   const verdicts = [];
   console.log('Environment');
   line(null, `Node ${process.version} on ${process.platform}`);
-  line(Boolean(KEY), 'OPENAI_API_KEY', KEY ? `set, ${KEY.length} characters, ${KEY.startsWith('sk-') ? 'starts with sk-' : 'does NOT start with sk-'}${/\s/.test(KEY) ? ', CONTAINS WHITESPACE' : ''}${/^["']|["']$/.test(KEY) ? ', HAS QUOTES AROUND IT' : ''}` : 'not set');
-  line(null, 'OPENAI_MODEL', MODEL);
+  line(null, 'AI provider', `${P.label} (AI_PROVIDER=${process.env.AI_PROVIDER || 'not set'}), endpoint ${BASE}`);
+  line(Boolean(KEY), P.keyName, KEY ? `set, ${KEY.length} characters, ${KEY.startsWith('sk-') ? 'starts with sk-' : 'does NOT start with sk-'}${/\s/.test(KEY) ? ', CONTAINS WHITESPACE' : ''}${/^["']|["']$/.test(KEY) ? ', HAS QUOTES AROUND IT' : ''}` : 'not set');
+  line(null, 'Model', MODEL);
   const proxy = process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy;
   line(null, 'Proxy variable', proxy ? proxyHost(proxy) : 'none set');
   line(null, 'NODE_USE_ENV_PROXY', process.env.NODE_USE_ENV_PROXY ?? 'not set (Node fetch ignores HTTPS_PROXY unless this is 1)');
@@ -90,14 +95,14 @@ async function main() {
   console.log('\n4. HTTPS request with Node fetch, no API key (expect HTTP 401)');
   let reachable = false;
   try {
-    const res = await fetch(`https://${HOST}/v1/models`, { signal: AbortSignal.timeout(TIMEOUT) });
+    const res = await fetch(`${BASE}/models`, { signal: AbortSignal.timeout(TIMEOUT) });
     const body = await res.text();
-    const fromOpenAI = Boolean(res.headers.get('openai-version') || res.headers.get('x-request-id') || /invalid_request_error|api key/i.test(body));
-    if (fromOpenAI) {
+    const fromProvider = !res.headers.get('x-deny-reason') && (Boolean(res.headers.get('openai-version') || res.headers.get('x-request-id') || res.headers.get('req-cost-time')) || /invalid_request_error|invalid_api_key|api.?key/i.test(body));
+    if (fromProvider) {
       reachable = true;
-      line(true, `OpenAI answered HTTP ${res.status}`, 'the network path works');
+      line(true, `${P.label} answered HTTP ${res.status}`, 'the network path works');
     } else {
-      line(false, `HTTP ${res.status} from something other than OpenAI`, redact(body));
+      line(false, `HTTP ${res.status} from something other than ${P.label}`, redact(body));
       verdicts.push('E');
     }
   } catch (err) {
@@ -112,31 +117,31 @@ async function main() {
   console.log('\n5. Same request with your API key');
   let keyOk = false;
   if (!KEY) {
-    line(false, 'skipped', 'OPENAI_API_KEY is not set');
+    line(false, 'skipped', `${P.keyName} is not set`);
     verdicts.push('F');
   } else if (reachable) {
-    const res = await fetch(`https://${HOST}/v1/models`, { headers: { Authorization: `Bearer ${KEY}` }, signal: AbortSignal.timeout(TIMEOUT) });
+    const res = await fetch(`${BASE}/models`, { headers: { Authorization: `Bearer ${KEY}` }, signal: AbortSignal.timeout(TIMEOUT) });
     const body = await res.text();
     if (res.ok) {
       keyOk = true;
       const ids = (JSON.parse(body).data ?? []).map((m) => m.id);
       line(true, `HTTP ${res.status}: key accepted`, `${ids.length} models available; ${MODEL} ${ids.includes(MODEL) ? 'is' : 'is NOT'} among them`);
       if (!ids.includes(MODEL)) {
-        line(false, `set OPENAI_MODEL in .env to one of your models`, ids.filter((id) => /^(gpt|o\d)/.test(id)).slice(0, 12).join(', '));
+        line(false, `set ${P.name === 'qwen' ? 'QWEN_MODEL' : 'OPENAI_MODEL'} in .env to one of your models`, ids.filter((id) => /^(gpt|o\d|qwen)/.test(id)).slice(0, 12).join(', '));
         verdicts.push('F');
       }
     } else {
       line(false, `HTTP ${res.status}`, redact(body));
       verdicts.push(res.status === 401 ? 'A' : 'B');
     }
-  } else line(null, 'skipped (OpenAI not reachable)');
+  } else line(null, `skipped (${P.label} not reachable)`);
 
-  console.log('\n6. Smallest chat completion with OPENAI_MODEL');
+  console.log(`\n6. Smallest chat completion with ${MODEL}`);
   if (keyOk) {
-    const res = await fetch(`https://${HOST}/v1/chat/completions`, {
+    const res = await fetch(`${BASE}/chat/completions`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${KEY}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: MODEL, messages: [{ role: 'user', content: 'Reply with the single word: ready' }], max_completion_tokens: 200 }),
+      body: JSON.stringify({ model: MODEL, messages: [{ role: 'user', content: 'Reply with the single word: ready' }], ...(P.name === 'qwen' ? { max_tokens: 50 } : { max_completion_tokens: 200 }) }),
       signal: AbortSignal.timeout(60000),
     });
     const body = await res.text();
@@ -151,7 +156,7 @@ async function main() {
 
   const MEANING = {
     A: 'API key is invalid',
-    B: 'OpenAI API is reachable but returning an HTTP error',
+    B: `${P.label} API is reachable but returning an HTTP error`,
     C: 'DNS/network connection is failing',
     D: 'TLS/SSL connection is failing',
     E: 'Proxy/firewall is blocking the request',
@@ -159,7 +164,7 @@ async function main() {
   };
   console.log('\nResult');
   const found = [...new Set(verdicts)];
-  if (!found.length) console.log('  All checks passed. The tutor can reach OpenAI.');
+  if (!found.length) console.log(`  All checks passed. The tutor can reach ${P.label}.`);
   for (const v of found) console.log(`  ${v}. ${MEANING[v]}`);
   process.exit(found.length ? 1 : 0);
 }

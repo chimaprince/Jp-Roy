@@ -22,16 +22,15 @@ for (const r of loadConfiguredCourses(db, path.join(here, 'data'))) {
   r.warnings.forEach((w) => console.warn(`  note: ${w}`));
 }
 const pkg = JSON.parse(fs.readFileSync(path.join(here, 'package.json'), 'utf8'));
-console.log(`Roy Medical Chinese tutor ${pkg.version} | AI provider: OpenAI (the only provider)`);
+const teacher = createTeacher();
+console.log(`Roy Medical Chinese tutor ${pkg.version} | AI provider: ${teacher.label} (AI_PROVIDER=${process.env.AI_PROVIDER || 'not set, chosen from available keys'})`);
 console.log(envFile ? `Environment file: ${envFile}` : 'Environment file: none found (looked for roy-tutor/.env and the repository root .env)');
 envProblems.forEach((p) => console.error(`  ${p}`));
-if (envFile && !envKeysFromFile.includes('OPENAI_API_KEY') && !process.env.OPENAI_API_KEY) console.error('  the file has no OPENAI_API_KEY= line');
-const teacher = createTeacher();
 if (teacher.configured) {
-  console.log(`OPENAI_API_KEY: detected (value hidden)${envKeysFromFile.includes('OPENAI_API_KEY') ? ' from the .env file' : ' from the shell environment'}`);
-  console.log(`OpenAI client: initialized, model ${teacher.model}`);
+  console.log(`${teacher.keyName}: detected (value hidden)${envKeysFromFile.includes(teacher.keyName) ? ' from the .env file' : ' from the shell environment'}`);
+  console.log(`${teacher.label} client: initialized, model ${teacher.model}, endpoint ${teacher.baseURL}`);
 } else {
-  console.error('OPENAI_API_KEY is not configured.');
+  console.error(`${teacher.keyName} is not configured.`);
   console.error('  The tutor will not run lessons until it is set. There is no scripted fallback.');
 }
 const tutor = new Tutor({ db, teacher, userId: process.env.TUTOR_USER_ID || 'roy', userName: process.env.TUTOR_USER_NAME || 'Roy' });
@@ -95,7 +94,7 @@ http.createServer(async (req, res) => {
     if (err.code === 'ai_not_configured') return send(res, 503, { error: err.message, code: err.code });
     if (err instanceof OpenAI.APIError) {
       // Do not pass the provider's error text to the browser; the server log has it.
-      return send(res, 502, { error: `The AI teacher request failed (status ${err.status ?? 'none'}). Check the server's API key and connection.`, code: 'ai_request_failed' });
+      return send(res, 502, { error: `The AI teacher request failed (status ${err.status ?? 'none'}). Check the server's AI provider key and connection.`, code: 'ai_request_failed' });
     }
     send(res, err.status === 413 ? 413 : 500, { error: err.status === 413 ? err.message : 'Something went wrong', code: null });
   }

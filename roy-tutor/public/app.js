@@ -335,6 +335,6 @@ api('GET', '/api/status').then((s) => {
   renderStatus(s);
   if (s.session) renderView(s.session);
   if (s.aiConfigured === false) {
-    setStatus('OPENAI_API_KEY is not configured. Set it in roy-tutor/.env on the server and restart the server.');
+    setStatus(`${s.aiKeyName || 'The AI provider key'} is not configured. Set it in roy-tutor/.env on the server and restart the server.`);
   }
 }).catch(() => {});

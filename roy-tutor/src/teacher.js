@@ -1,18 +1,18 @@
 import OpenAI from 'openai';
 
-// The AI teacher. Server side only: OPENAI_API_KEY is read from the server's
-// environment here and never reaches the browser.
+// The AI teacher. Server side only: API keys are read from the server's
+// environment here and never reach the browser.
 //
 // The tutor engine (tutor.js) owns the lesson state (curriculum position,
 // current exercise, review queue, progress). Each turn it hands the teacher a
-// full description of that state plus what Roy just said; the teacher (an
+// full description of that state plus what Roy just said; the teacher (a Qwen or
 // OpenAI model) decides what Roy meant, whether it shows understanding, and
 // what to say next, and returns that as structured lesson state plus speech.
 
 
 export class TeacherNotConfigured extends Error {
-  constructor() {
-    super('OPENAI_API_KEY is not configured.');
+  constructor(keyName = 'OPENAI_API_KEY') {
+    super(`${keyName} is not configured.`);
     this.status = 503;
     this.code = 'ai_not_configured';
   }
@@ -100,37 +100,125 @@ SPEAKING STYLE
 - zh lines: Chinese characters only, so the Mandarin voice reads them. To show pinyin, put the characters in text and "characters — pinyin" in show. Never put pinyin or Chinese inside an en line's text except in show.
 - Always end with one clear question or instruction for Roy that matches the listening language in the lesson state (Mandarin or English), unless the session is ending.`;
 
-export function createTeacher({ client, log = console } = {}) {
-  // Read when the teacher is created, after .env has been loaded.
-  const MODEL = process.env.OPENAI_MODEL || 'gpt-5.5';
-  const REASONING_EFFORT = process.env.OPENAI_REASONING_EFFORT || 'low';
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!client && !apiKey) {
-    return { configured: false, provider: 'openai', model: MODEL, async decide() { throw new TeacherNotConfigured(); } };
+// ---------- providers ----------
+//
+// Both providers speak the OpenAI chat-completions protocol, so the same SDK
+// client is used with a different base URL and key.
+//
+//   AI_PROVIDER=qwen    (primary) Qwen through Alibaba Cloud Model Studio's
+//                       OpenAI-compatible endpoint. Key: QWEN_API_KEY (or
+//                       DASHSCOPE_API_KEY). QWEN_BASE_URL picks the region.
+//   AI_PROVIDER=openai  OpenAI. Key: OPENAI_API_KEY.
+//
+// If AI_PROVIDER is not set: Qwen when a Qwen key exists, otherwise OpenAI when
+// an OpenAI key exists, otherwise Qwen (reported as not configured).
+
+const QWEN_INTL = 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1';
+
+export function providerSettings(env = process.env) {
+  const qwenKey = env.QWEN_API_KEY || env.DASHSCOPE_API_KEY || '';
+  const openaiKey = env.OPENAI_API_KEY || '';
+  const requested = (env.AI_PROVIDER || '').trim().toLowerCase();
+  const name = requested || (qwenKey ? 'qwen' : openaiKey ? 'openai' : 'qwen');
+  if (name === 'qwen') {
+    return {
+      name: 'qwen',
+      label: 'Qwen',
+      keyName: env.DASHSCOPE_API_KEY && !env.QWEN_API_KEY ? 'DASHSCOPE_API_KEY' : 'QWEN_API_KEY',
+      apiKey: qwenKey,
+      baseURL: env.QWEN_BASE_URL || QWEN_INTL,
+      model: env.QWEN_MODEL || 'qwen-plus',
+      // Qwen's compatible mode: JSON mode (the reply is checked against the
+      // schema below) and max_tokens; no reasoning_effort.
+      structured: 'json_object',
+      extra: { max_tokens: 4000 },
+    };
   }
-  const openai = client ?? new OpenAI({ apiKey });
+  if (name === 'openai') {
+    return {
+      name: 'openai',
+      label: 'OpenAI',
+      keyName: 'OPENAI_API_KEY',
+      apiKey: openaiKey,
+      baseURL: env.OPENAI_BASE_URL || undefined,
+      model: env.OPENAI_MODEL || 'gpt-5.5',
+      structured: 'json_schema',
+      extra: { max_completion_tokens: 4000, reasoning_effort: env.OPENAI_REASONING_EFFORT || 'low' },
+    };
+  }
+  throw new Error(`AI_PROVIDER must be "qwen" or "openai", not "${env.AI_PROVIDER}".`);
+}
+
+// Checks a reply against DECISION_SCHEMA (used when the provider only
+// guarantees JSON, not the schema). Returns a list of problems.
+export function checkDecision(d) {
+  const problems = [];
+  if (!d || typeof d !== 'object' || Array.isArray(d)) return ['reply is not a JSON object'];
+  const check = (value, schema, where) => {
+    const types = [].concat(schema.type);
+    const typeOk = types.some((t) => (t === 'null' ? value === null : t === 'array' ? Array.isArray(value) : t === 'object' ? value && typeof value === 'object' && !Array.isArray(value) : typeof value === t));
+    if (!typeOk) { problems.push(`${where} should be ${types.join(' or ')}`); return; }
+    if (schema.enum && !schema.enum.includes(value)) problems.push(`${where} must be one of ${schema.enum.filter((x) => x !== null).join(', ')}`);
+    if (Array.isArray(value) && schema.items) value.forEach((v, i) => check(v, schema.items, `${where}[${i}]`));
+    if (value && typeof value === 'object' && !Array.isArray(value) && schema.properties) {
+      for (const key of schema.required ?? []) {
+        if (!(key in value)) problems.push(`${where}.${key} is missing`);
+        else check(value[key], schema.properties[key], `${where}.${key}`);
+      }
+    }
+  };
+  check(d, DECISION_SCHEMA, 'reply');
+  return problems;
+}
+
+const JSON_INSTRUCTIONS = `\n\nOUTPUT FORMAT\nReply with one JSON object only, no other text. It must match this JSON schema exactly (every property present; use null where allowed):\n${JSON.stringify(DECISION_SCHEMA)}`;
+
+export function createTeacher({ client, log = console, env = process.env } = {}) {
+  // Read when the teacher is created, after .env has been loaded.
+  const p = providerSettings(env);
+  if (!client && !p.apiKey) {
+    return { configured: false, provider: p.name, label: p.label, keyName: p.keyName, model: p.model, baseURL: p.baseURL, async decide() { throw new TeacherNotConfigured(p.keyName); } };
+  }
+  const api = client ?? new OpenAI({ apiKey: p.apiKey, baseURL: p.baseURL });
+  const system = p.structured === 'json_object' ? SYSTEM_PROMPT + JSON_INSTRUCTIONS : SYSTEM_PROMPT;
+  const responseFormat = p.structured === 'json_object'
+    ? { type: 'json_object' }
+    : { type: 'json_schema', json_schema: { name: 'teacher_decision', strict: true, schema: DECISION_SCHEMA } };
+
+  async function call(messages) {
+    const started = Date.now();
+    const completion = await api.chat.completions.create({ model: p.model, ...p.extra, response_format: responseFormat, messages });
+    const choice = completion.choices[0];
+    log.log(`[teacher] <- ${p.label} id=${completion.id} model=${completion.model} finish=${choice.finish_reason} ${Date.now() - started}ms tokens=${completion.usage?.total_tokens ?? '?'}`);
+    if (choice.message.refusal) throw new Error(`The AI teacher refused: ${choice.message.refusal}`);
+    if (choice.finish_reason === 'length') throw new Error('The AI teacher reply was cut off (token limit).');
+    return choice.message.content ?? '';
+  }
+
   return {
     configured: true,
-    provider: 'openai',
-    model: MODEL,
+    provider: p.name,
+    label: p.label,
+    keyName: p.keyName,
+    model: p.model,
+    baseURL: p.baseURL ?? 'https://api.openai.com/v1',
     async decide(context) {
-      const started = Date.now();
-      log.log(`[teacher] -> OpenAI chat.completions model=${MODEL} event=${context.event} exercise=${context.lesson_state?.exercise} roy="${context.roy_said?.text ?? ''}"`);
-      const completion = await openai.chat.completions.create({
-        model: MODEL,
-        reasoning_effort: REASONING_EFFORT,
-        max_completion_tokens: 4000,
-        response_format: { type: 'json_schema', json_schema: { name: 'teacher_decision', strict: true, schema: DECISION_SCHEMA } },
-        messages: [
-          { role: 'system', content: SYSTEM_PROMPT },
-          { role: 'user', content: JSON.stringify(context, null, 1) },
-        ],
-      });
-      const choice = completion.choices[0];
-      log.log(`[teacher] <- OpenAI id=${completion.id} model=${completion.model} finish=${choice.finish_reason} ${Date.now() - started}ms tokens=${completion.usage?.total_tokens ?? '?'}`);
-      if (choice.message.refusal) throw new Error(`The AI teacher refused: ${choice.message.refusal}`);
-      if (choice.finish_reason === 'length') throw new Error('The AI teacher reply was cut off (max_completion_tokens).');
-      const decision = JSON.parse(choice.message.content);
+      log.log(`[teacher] -> ${p.label} chat.completions model=${p.model} event=${context.event} exercise=${context.lesson_state?.exercise} roy="${context.roy_said?.text ?? ''}"`);
+      const messages = [
+        { role: 'system', content: system },
+        { role: 'user', content: JSON.stringify(context, null, 1) },
+      ];
+      let text = await call(messages);
+      let decision;
+      let problems;
+      try { decision = JSON.parse(text); problems = checkDecision(decision); } catch { problems = ['reply is not valid JSON']; }
+      if (problems.length) {
+        // One corrected retry, then give up loudly (no scripted fallback).
+        log.warn(`[teacher]    reply did not match the schema (${problems.slice(0, 3).join('; ')}); asking once more`);
+        text = await call([...messages, { role: 'assistant', content: text }, { role: 'user', content: `That reply did not match the required JSON schema: ${problems.join('; ')}. Send the corrected JSON object only.` }]);
+        try { decision = JSON.parse(text); problems = checkDecision(decision); } catch { problems = ['reply is not valid JSON']; }
+        if (problems.length) throw new Error(`The AI teacher's reply did not match the lesson schema: ${problems.join('; ')}`);
+      }
       log.log(`[teacher]    intent=${decision.intent} correct=${decision.correct} exercise_complete=${decision.exercise_complete} next=${decision.next_action}`);
       return decision;
     },
