@@ -27,6 +27,12 @@ Open the page in any current browser (Chrome, Edge, Safari, iPhone Safari). Pres
 
 ### Settings (server only; in `.env` or the shell)
 
+`roy-tutor/.env` is the source of truth: a value there replaces the same
+variable set in the shell or the Windows environment, and the startup log (and
+`npm run check-voice`) prints a `note:` whenever that happens. Duplicate lines in
+`.env` and a second, unused `.env` file are reported too. `TUTOR_ENV_FILE=<path>`
+loads another file; `TUTOR_ENV_FILE=none` loads none (the tests use this).
+
 | Variable | Purpose |
 |---|---|
 | `DASHSCOPE_API_KEY` | **Required.** Key for Qwen (Alibaba Cloud Model Studio, OpenAI-compatible API), the tutor's only AI provider. |

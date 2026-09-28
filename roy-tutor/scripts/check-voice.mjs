@@ -8,7 +8,7 @@
 //    and no file is given, ASR gets a short silent clip, which checks that
 //    ASR answers and accepts the key.
 // No microphone or browser needed. Never prints the API key.
-import '../src/env.js';
+import { envFile, envProblems, envNotices, envSource } from '../src/env.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -20,13 +20,16 @@ const out = path.join(here, '..', 'voice-check.wav');
 const voice = createVoice();
 const LINE = '硬膜外。医生说：我们需要打硬膜外。';
 
+console.log(`ASR model: ${voice.asrModel}`);
+console.log(`ASR protocol: ${voice.asrProtocol === 'native' ? 'native DashScope' : 'OpenAI-compatible (qwen3-asr only)'}`);
+console.log(`ASR endpoint: ${voice.asrURL}`);
+console.log(`QWEN_ASR_MODEL from: ${envSource('QWEN_ASR_MODEL')}${envFile ? ` (env file: ${envFile})` : ' (no .env file found)'}`);
+envProblems.forEach((p) => console.error(`!!  ${p}`));
+envNotices.forEach((n) => console.warn(`note: ${n}`));
 console.log(`TTS model:    ${voice.ttsModel}`);
 console.log(`TTS endpoint: ${voice.ttsURL}`);
 console.log(`TTS voice:    ${voice.ttsVoice}`);
 console.log(`TTS style:    ${voice.ttsInstructions}`);
-console.log(`ASR model:    ${voice.asrModel}`);
-console.log(`ASR endpoint: ${voice.asrURL}`);
-console.log(`ASR protocol: ${voice.asrProtocol === 'openai' ? 'OpenAI-compatible chat completions' : 'DashScope native multimodal-generation'}`);
 const asrProblem = asrEndpointProblem(voice.asrURL);
 if (asrProblem) console.error(`!!  ${asrProblem}`);
 if (!voice.configured) {

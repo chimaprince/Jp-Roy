@@ -10,6 +10,9 @@ import { lanAddresses, serverUrls } from '../src/network.js';
 
 const appDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 
+// The developer's own Qwen/tutor settings never leak into test servers.
+const cleanEnv = () => Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(QWEN_|DASHSCOPE_|TUTOR_)/.test(k)));
+
 const FAKE_INTERFACES = {
   lo: [{ address: '127.0.0.1', family: 'IPv4', internal: true }, { address: '::1', family: 'IPv6', internal: true }],
   'Wi-Fi': [{ address: 'fe80::1', family: 'IPv6', internal: false }, { address: '192.168.1.23', family: 'IPv4', internal: false }],
@@ -46,7 +49,7 @@ function freePort() {
 async function startServer(extraEnv = {}) {
   const port = await freePort();
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'roy-net-'));
-  const env = { ...process.env, PORT: String(port), TUTOR_DB: path.join(dir, 'tutor.db'), DASHSCOPE_API_KEY: 'not-a-real-key-for-tests', ...extraEnv };
+  const env = { ...cleanEnv(), TUTOR_ENV_FILE: 'none', PORT: String(port), TUTOR_DB: path.join(dir, 'tutor.db'), DASHSCOPE_API_KEY: 'not-a-real-key-for-tests', ...extraEnv };
   const child = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', 'server.js'], { cwd: appDir, env });
   let output = '';
   await new Promise((resolve, reject) => {

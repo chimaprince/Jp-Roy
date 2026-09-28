@@ -21,6 +21,9 @@ import {
 const appDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const KEY = 'test-key-not-real-1234567890';
 
+// The developer's own Qwen/tutor settings never leak into test servers.
+const cleanEnv = () => Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(QWEN_|DASHSCOPE_|TUTOR_)/.test(k)));
+
 // ---------- browser helpers (recording and playback) ----------
 
 test('recordings become 16-bit mono WAV that any recogniser accepts', () => {
@@ -414,7 +417,7 @@ async function startTutor(qwenPort, extraEnv = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'roy-audio-'));
   const base = `http://localhost:${qwenPort}`;
   const env = {
-    ...process.env, PORT: String(port), HOST: '127.0.0.1', TUTOR_DB: path.join(dir, 'tutor.db'),
+    ...cleanEnv(), TUTOR_ENV_FILE: 'none', PORT: String(port), HOST: '127.0.0.1', TUTOR_DB: path.join(dir, 'tutor.db'),
     DASHSCOPE_API_KEY: KEY, QWEN_BASE_URL: `${base}/teacher`, QWEN_MODEL: 'qwen-test',
     QWEN_ASR_BASE_URL: `${base}/asr`, QWEN_TTS_URL: `${base}/tts`, ...extraEnv,
   };
@@ -497,7 +500,7 @@ test('end to end: recording → Qwen ASR → tutor engine → Qwen TTS audio, ke
     for (const page of ['/', '/app.js', '/voice-core.js']) everything.push(await (await fetch(`${s.url}${page}`)).text());
     for (const text of everything) assert.ok(!text.includes(KEY) && !/DASHSCOPE_API_KEY=|Authorization|Bearer/.test(text), 'no key in anything the browser receives');
     assert.ok(!s.output().includes(KEY), 'the key is not printed');
-    assert.match(s.output(), /speech recognition: Qwen qwen-audio-3\.1-asr-flash at http:\/\/localhost:\d+\/api\/v1\/services\/aigc\/multimodal-generation\/generation/);
+    assert.match(s.output(), /speech recognition: Qwen qwen-audio-3\.1-asr-flash \(QWEN_ASR_MODEL from default\), native DashScope API at http:\/\/localhost:\d+\/api\/v1\/services\/aigc\/multimodal-generation\/generation/);
     assert.match(s.output(), /teacher voice: Qwen qwen3-tts-instruct-flash/);
   } finally {
     await s.stop();

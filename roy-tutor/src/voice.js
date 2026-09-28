@@ -71,6 +71,9 @@ const MAX_TTS_CHARS = 500;
 const TIMEOUT_MS = 30_000;
 
 export function voiceSettings(env = process.env) {
+  // Values are trimmed: a stray space or CR from a Windows .env must not
+  // change which model or protocol is used.
+  env = Object.fromEntries(Object.entries(env).map(([k, v]) => [k, typeof v === 'string' ? v.trim() : v]));
   return {
     apiKey: env.DASHSCOPE_API_KEY || '',
     asrModel: env.QWEN_ASR_MODEL || ASR_DEFAULT_MODEL,

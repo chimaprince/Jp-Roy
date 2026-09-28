@@ -1,4 +1,4 @@
-import { envFile, envKeysFromFile, envProblems } from './src/env.js'; // must stay the first import
+import { envFile, envKeysFromFile, envProblems, envNotices, envSource } from './src/env.js'; // must stay the first import
 import http from 'node:http';
 import https from 'node:https';
 import OpenAI from 'openai'; // HTTP client for Qwen's OpenAI-compatible API (error types)
@@ -36,6 +36,7 @@ const teacher = createTeacher();
 console.log(`Roy Medical Chinese tutor ${pkg.version}`);
 console.log(envFile ? `Environment file: ${envFile}` : 'Environment file: none found (looked for roy-tutor/.env and the repository root .env)');
 envProblems.forEach((p) => console.error(`  ${p}`));
+envNotices.forEach((n) => console.warn(`  note: ${n}`));
 console.log('AI provider: Qwen');
 console.log(`model: ${teacher.model}`);
 console.log(`endpoint: ${teacher.baseURL}`);
@@ -47,7 +48,7 @@ if (teacher.configured) {
 }
 const voice = createVoice();
 const speech = new SpeechStore(voice);
-console.log(`speech recognition: Qwen ${voice.asrModel} at ${voice.asrURL}`);
+console.log(`speech recognition: Qwen ${voice.asrModel} (QWEN_ASR_MODEL from ${envSource('QWEN_ASR_MODEL')}), ${voice.asrProtocol === 'native' ? 'native DashScope' : 'OpenAI-compatible'} API at ${voice.asrURL}`);
 if (asrEndpointProblem(voice.asrURL)) console.error(`  ${asrEndpointProblem(voice.asrURL)}`);
 console.log(`teacher voice: Qwen ${voice.ttsModel} (voice ${voice.ttsVoice}) at ${voice.ttsURL}`);
 const tutor = new Tutor({ db, teacher, userId: process.env.TUTOR_USER_ID || 'roy', userName: process.env.TUTOR_USER_NAME || 'Roy' });
