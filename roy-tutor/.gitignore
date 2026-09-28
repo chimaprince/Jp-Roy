@@ -7,3 +7,4 @@ __pycache__/
 !.env.example
 *.pem
 certs/
+voice-check.wav

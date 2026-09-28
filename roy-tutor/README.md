@@ -13,15 +13,17 @@ npm install
 cp .env.example .env      # then fill in DASHSCOPE_API_KEY
 npm run check-ai          # checks the network path, key and model for Qwen
 npm run try-word1         # a real Word 1 conversation with Qwen, printed
+npm run check-voice       # real Qwen TTS + ASR round trip (saves voice-check.wav)
 npm start                 # http://localhost:3000
 npm test
 ```
 
 On startup the terminal shows `AI provider: Qwen`, the model, the endpoint and
 `DASHSCOPE_API_KEY: detected (value hidden)`. Every turn then logs a
-`[teacher] -> Qwen chat.completions ...` line and the reply's id. `.env` is ignored by Git; never commit it.
+`[teacher] -> Qwen chat.completions ...` line and the reply's id, and every
+voice step logs `[voice] -> Qwen ASR ...` / `[voice] -> Qwen TTS ...`. `.env` is ignored by Git; never commit it.
 
-Open the page in Chrome or Edge (speech input). Press **🎙 START TALKING**.
+Open the page in any current browser (Chrome, Edge, Safari, iPhone Safari). Press **🎙 START TALKING**.
 
 ### Settings (server only; in `.env` or the shell)
 
@@ -31,12 +33,11 @@ Open the page in Chrome or Edge (speech input). Press **🎙 START TALKING**.
 | `QWEN_MODEL` | Default `qwen3.8-flash`. |
 | `QWEN_BASE_URL` | Default `https://ws-c2mgxehx4ud1bn7.cn-beijing.maas.aliyuncs.com/compatible-mode/v1`. |
 | `QWEN_ENABLE_THINKING` | Default `false` (faster replies for voice). |
-
-Without `DASHSCOPE_API_KEY` lessons do not start: the server and the page say
-"Qwen is not configured: DASHSCOPE_API_KEY is missing." There is no scripted
-fallback. Qwen replies use JSON mode and are checked against the lesson schema
-on the server (one corrected retry, then an error).
-
+| `QWEN_ASR_MODEL` | Speech recognition model. Default `qwen3-asr-flash`. |
+| `QWEN_ASR_BASE_URL` | Default `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` (Singapore). |
+| `QWEN_TTS_MODEL` | Teacher voice model. Default `qwen3-tts-flash`. |
+| `QWEN_TTS_URL` | Default `https://dashscope-intl.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation` (Singapore). |
+| `QWEN_TTS_VOICE` | Default `Cherry` (speaks Mandarin and English). |
 | `TUTOR_ACCESS_CODE` | Optional passcode. The browser asks for it once. Set it when the app is on the internet. |
 | `TUTOR_TIMEZONE` | Roy's time zone (for example `Asia/Shanghai`), used to decide when a new study day starts. |
 | `TUTOR_DB` | SQLite file path, default `roy-tutor/tutor.db`. |
@@ -44,7 +45,16 @@ on the server (one corrected retry, then an error).
 | `HOST` | Default `0.0.0.0` (reachable from your phone on the same Wi-Fi); `127.0.0.1` for this computer only. |
 | `TUTOR_HTTPS_CERT`, `TUTOR_HTTPS_KEY` | Optional certificate and key files to serve over https (needed for the phone microphone). |
 
-The API key is only read by the server (`src/teacher.js`). The browser never sees it.
+Without `DASHSCOPE_API_KEY` lessons do not start: the server and the page say
+"Qwen is not configured: DASHSCOPE_API_KEY is missing." There is no scripted
+fallback. Qwen replies use JSON mode and are checked against the lesson schema
+on the server (one corrected retry, then an error).
+
+The API key is only read by the server (`src/teacher.js`, `src/voice.js`). The
+browser never sees it, and never talks to Qwen directly: it uploads recordings
+to this server and downloads the teacher's audio from this server. The same
+key is used for the teacher, ASR and TTS, so it must be a key for the region of
+those endpoints (Singapore by default for voice).
 
 ## Testing on a phone (same Wi-Fi)
 
@@ -78,9 +88,9 @@ New-NetFirewallRule -DisplayName "Roy tutor (dev) 3000" -Direction Inbound -Prot
 (remove it later with `Remove-NetFirewallRule -DisplayName "Roy tutor (dev) 3000"`).
 
 **The microphone needs https or localhost.** Phone browsers block the
-microphone and speech recognition on plain `http://192.168.x.x`. The page
-still works there (the teacher speaks; you can type), and it says why the
-microphone is off. To talk from the phone, use one of these:
+microphone on plain `http://192.168.x.x`. The page still works there (the
+teacher speaks; you can type), and it says why the microphone is off. To talk
+from the phone, use one of these (on iPhone, only option 3 works):
 
 1. *Android Chrome, quickest:* on the phone open
    `chrome://flags/#unsafely-treat-insecure-origin-as-secure`, enter
@@ -101,9 +111,15 @@ microphone is off. To talk from the phone, use one of these:
    mkcert's root certificate (`mkcert -CAROOT` shows where `rootCA.pem` is;
    install it on the phone as a CA certificate). `certs/` is ignored by Git.
 
-Speech recognition on the phone also needs the phone's own internet access
-(Chrome sends the audio to Google). iPhone Safari's speech recognition is
-less reliable than Chrome's.
+   **iPhone, step by step:** after `mkcert -install`, AirDrop or email
+   `rootCA.pem` (from the `mkcert -CAROOT` folder) to the iPhone and open it;
+   then Settings › General › VPN & Device Management › install the profile;
+   then Settings › General › About › Certificate Trust Settings › turn on full
+   trust for the mkcert root. Open `https://192.168.1.23:3000` in Safari, tap
+   START TALKING and allow the microphone.
+
+Speech recognition and the teacher's voice run on the laptop (Qwen), so the
+phone only needs to reach the laptop over Wi-Fi.
 
 ## How the tutor works
 
@@ -127,28 +143,38 @@ applies that decision, and an exercise only completes on an actual answer.
 
 ## Answering by voice
 
-Tap **🎙 START TALKING**. The tutor speaks, the microphone opens, Roy answers,
-and the tutor replies, then listens again. The badge under the button shows the
-state: IDLE → TEACHER RESPONSE → LISTENING → PROCESSING → TEACHER RESPONSE →
-LISTENING AGAIN.
+Tap **🎙 START TALKING**. The teacher speaks, the microphone opens, Roy answers,
+and the teacher replies, then listens again. The badge under the button shows
+each step:
 
-The lesson state sets the recognition language: Mandarin for saying the term,
-sentences, role-play and review; English for explaining the meaning. The
-status line shows the language in use while listening. Chrome gets
-`cmn-Hans-CN`; other browsers get `zh-CN`.
+IDLE → TEACHER THINKING → PREPARING TEACHER VOICE → TEACHER AUDIO READY →
+TEACHER SPEAKING → LISTENING → AUDIO CAPTURED → TRANSCRIPT RECEIVED →
+TEACHER THINKING → … → LISTENING AGAIN
 
-Chrome recognises one language at a time. When the lesson expects Mandarin
-but Roy wants to say something in English ("I don't know", "can you explain
-that again?"), or the reverse, he taps the **Mic: … · switch to …** button
-under the status line. The switch lasts for that one answer; the next teacher
-reply sets the language from the lesson again.
+**Speech in (Qwen ASR).** The page records with the microphone (`MediaRecorder`;
+iPhone Safari records mp4), stops when Roy pauses (or when he taps
+**✋ DONE TALKING**), converts the recording to 16 kHz mono WAV and uploads it
+to `POST /api/voice/transcribe`. The server sends it to **qwen3-asr-flash** with
+the lesson's language as a hint: Mandarin for saying the term, sentences,
+role-play and review; English for explaining the meaning. The transcript then
+goes to the tutor exactly like a typed answer (marked as voice). If Roy wants
+to answer in the other language ("I don't know" during a Mandarin exercise),
+he taps **Answer language: … · switch to …** for that one answer.
 
-The teacher's replies are read by the browser's speech voices. Each line is
-split by script, so Chinese characters are read by a Chinese voice and the rest
-by an English voice. This is playback only, not pronunciation scoring.
+If Qwen ASR fails, the page says so, nothing is counted, and **↻ RETRY** sends
+the same recording again. If no words were recognised, Roy is asked to say it
+again.
 
-**Word recognition vs pronunciation.** The browser's speech recogniser gives
-text, not audio. The server reports to the teacher whether the recogniser wrote
+**Speech out (Qwen TTS).** Each line of the teacher's reply is sent by the
+server to **qwen3-tts-flash** (voice `Cherry`, Chinese mode for any line with
+Mandarin in it) as soon as the teacher has answered. The page fetches the audio
+from `GET /api/voice/speech/<id>` and plays it. Only lines the tutor itself
+produced can be spoken; the page cannot ask the server to say arbitrary text.
+If TTS fails, the teacher's text is shown in the conversation and the lesson
+carries on. The browser's built-in speech recognition and speech voices are not
+used at all.
+
+**Word recognition vs pronunciation.** Qwen ASR gives text, not a score. The server reports to the teacher whether the recogniser wrote
 down the expected characters (`src/recognition.js`). That is word recognition,
 not a pronunciation or tone score, and the teacher is told never to judge tones
 from it. `assessPronunciation()` in `src/recognition.js` is the hook for real
@@ -187,13 +213,14 @@ twice on it.
 server.js              HTTP server and JSON API
 src/tutor.js           tutor engine: lesson state, order, review, jumps, progress
 src/teacher.js         the AI teacher (Qwen, server side only)
+src/voice.js           Qwen speech recognition and teacher voice (server side only)
 src/recognition.js     word recognition from the transcript; pronunciation hook
 src/intents.js         resolves a jump target to a curriculum entry
 src/match.js           text normalisation helpers
 src/db.js              SQLite schema and queries
 src/curriculum.js      curriculum validation and import
 data/                  curriculum files (see data/README.md)
-public/                the voice interface
+public/                the voice interface (records audio, plays the teacher audio)
 ```
 
 Database tables: `courses`, `curriculum` (id, course_id, position, english,

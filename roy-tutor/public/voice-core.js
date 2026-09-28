@@ -1,21 +1,15 @@
 // Pure helpers for the voice page. No DOM, no network: the page (app.js) uses
 // them, and the tests run them in Node.
+//
+// Voice now runs on the server: the page records Roy's answer, uploads it,
+// and Qwen turns it into text (qwen3-asr-flash); the teacher's replies come
+// back as Qwen audio (qwen3-tts-flash). The browser's own speech recognition
+// and speech synthesis are not used, so this works the same on iPhone Safari.
 
-// Recognition language for the browser: zh-CN for Mandarin, en-US for
-// English. The server decides which one the next answer should be in; Roy can
-// override it for one turn. (An earlier version sent Chrome "cmn-Hans-CN";
-// zh-CN is the tag Chrome documents and accepts, so it is used everywhere.)
-export const RECOGNITION_LANGS = { 'zh-CN': 'zh-CN', 'en-US': 'en-US' };
-
+// The language the lesson expects next: zh-CN (Mandarin) or en-US (English).
+// It is sent to the server as the speech recognition language hint.
 export function recognitionLang(lang) {
-  return RECOGNITION_LANGS[lang] ?? 'en-US';
-}
-
-// Kept for the page's own use (and tests); no longer changes the language tag.
-export function isChromeBrowser(nav) {
-  if (!nav) return false;
-  if (nav.userAgentData?.brands?.some((b) => b.brand === 'Google Chrome')) return true;
-  return /Chrome\//.test(nav.userAgent ?? '') && !/Edg\//.test(nav.userAgent ?? '');
+  return lang === 'zh-CN' ? 'zh-CN' : 'en-US';
 }
 
 export const LANGUAGE_LABEL = { 'zh-CN': 'Mandarin', 'en-US': 'English' };
@@ -44,34 +38,29 @@ export function lessonStateText(view) {
   return parts.join(' · ');
 }
 
-// Speech playback: split each line into runs by script, so Chinese characters
-// are read by a Chinese voice and Latin text by an English voice, whatever
-// language the line was labelled with.
-const HAN_RUN = /([\p{Script=Han}\u3000-\u303f\uff00-\uffef]+(?:[\s\p{Script=Han}\u3000-\u303f\uff00-\uffef]*[\p{Script=Han}\u3000-\u303f\uff00-\uffef])?)/u;
-const HAS_HAN = /\p{Script=Han}/u;
-const HAS_LETTER_OR_DIGIT = /[\p{L}\p{N}]/u;
+// ---------- page states ----------
 
-export function speechParts(segment) {
-  const text = String(segment?.text ?? '');
-  const rate = segment?.rate;
-  const out = [];
-  for (const piece of text.split(HAN_RUN)) {
-    if (!piece || !piece.trim()) continue;
-    const lang = HAS_HAN.test(piece) ? 'zh' : 'en';
-    // Punctuation-only fragments are not worth a separate utterance.
-    if (lang === 'en' && !HAS_LETTER_OR_DIGIT.test(piece)) continue;
-    const prev = out.at(-1);
-    if (prev && prev.lang === lang) prev.text += piece;
-    else out.push({ lang, text: piece.trim(), ...(rate ? { rate } : {}) });
-  }
-  return out.map((p) => ({ ...p, text: p.text.trim() }));
-}
+export const STATES = {
+  idle: { badge: 'IDLE', button: '🎙 START TALKING' },
+  listening: { badge: 'LISTENING', button: '✋ DONE TALKING' },
+  captured: { badge: 'AUDIO CAPTURED', button: '⏳ SENDING…' },
+  transcribed: { badge: 'TRANSCRIPT RECEIVED', button: '⏳ THINKING…' },
+  processing: { badge: 'TEACHER THINKING', button: '⏳ THINKING…' },
+  preparing: { badge: 'PREPARING TEACHER VOICE', button: '⏳ PREPARING…' },
+  ready: { badge: 'TEACHER AUDIO READY', button: '🔊 TEACHER SPEAKING' },
+  speaking: { badge: 'TEACHER SPEAKING', button: '🔊 TEACHER SPEAKING' },
+};
 
-// Human-readable messages for everything that can go wrong.
+// States in which a tap on the big button is ignored (work is under way).
+export const BUSY_STATES = new Set(['captured', 'transcribed', 'processing', 'preparing']);
+
+// ---------- messages ----------
+
 export function friendlyError(err) {
   const code = err?.code;
   if (code === 'ai_not_configured') return 'The AI teacher is not set up on the server (DASHSCOPE_API_KEY is missing).';
   if (code === 'ai_request_failed') return "The AI teacher (Qwen) didn't answer. Check the server's internet connection and try again.";
+  if (VOICE_ERRORS[code]) return VOICE_ERRORS[code];
   if (err?.name === 'TypeError' || /Failed to fetch|NetworkError|Load failed/i.test(err?.message ?? '')) {
     return "Can't reach the tutor server. Is it still running? Check the terminal, then try again.";
   }
@@ -79,205 +68,144 @@ export function friendlyError(err) {
   return err?.message || 'Something went wrong. Try again.';
 }
 
-export const RECOGNITION_ERRORS = {
-  'not-allowed': 'Microphone access is blocked. Click the camera/microphone icon in the address bar, allow the microphone, then tap START TALKING. You can also type below.',
-  'service-not-allowed': 'This browser does not allow speech recognition here. Use Chrome or Edge on http://localhost:3000, or type below.',
-  'audio-capture': 'No microphone was found. Connect or enable one and tap START TALKING, or type below.',
-  network: "The browser's speech recognition service can't be reached (Chrome sends audio to Google to recognise it, so it needs the internet). Type below for now.",
-  'language-not-supported': "This browser can't recognise that language. Tap the language button to switch, or type below.",
-  'bad-grammar': 'Speech recognition was set up wrongly (bad-grammar). Reload the page and try again.',
-  'start-failed': "The microphone could not start (it may be in use by another tab or app). Close other tabs using the microphone and tap START TALKING.",
-  'start-timeout': "Speech recognition did not start. Reload the page; if it keeps happening, restart Chrome.",
-  'no-result': 'Sound was heard but no words were recognised. Speak a little louder and closer to the microphone, check the language shown above, then tap START TALKING.',
-  timeout: 'Listening took too long without a result, so it was stopped. Tap START TALKING to try again.',
-  'insecure-context': 'This page was opened over plain http:// from another device, so the browser blocks the microphone here. You can type your answers below, or open the tutor over https:// (see "Testing on a phone" in the README).',
+export const VOICE_ERRORS = {
+  'insecure-context': 'This page was opened over plain http:// from another device, so the browser blocks the microphone. Type your answers below, or open the tutor over https:// (see "Testing on a phone" in the README).',
+  unsupported: 'This browser cannot record audio. Update the browser (iPhone: iOS 14.3 or later), or type your answer below.',
+  'not-allowed': 'Microphone access is blocked. Allow the microphone for this site (iPhone: the "aA" menu › Website Settings › Microphone), then tap START TALKING. You can also type below.',
+  'no-mic': 'No microphone was found. Connect or enable one and tap START TALKING, or type below.',
+  'mic-busy': 'The microphone is in use by another app or tab. Close it, then tap START TALKING.',
+  'no-speech': "I didn't hear anything. Tap START TALKING and speak a little louder.",
+  asr_empty: 'Your recording reached Qwen, but no words were recognised. Tap START TALKING and say it again, a little louder and closer to the phone.',
+  asr_failed: "Qwen speech recognition didn't answer. Your answer was not counted. Tap RETRY to send the same recording again, or START TALKING to record it again.",
+  asr_bad_audio: 'The recording format was not accepted. Tap START TALKING to try again, or type below.',
+  asr_no_audio: 'The recording was empty. Tap START TALKING and speak.',
+  audio_too_large: 'That recording was too long. Keep each answer under about a minute.',
+  tts_failed: "The teacher's voice (Qwen) could not be produced for this reply. Read it in the conversation below; the lesson carries on.",
+  tts_expired: "The teacher's audio for this reply has expired. Read it in the conversation below.",
+  'play-blocked': 'The phone blocked the teacher audio. Tap START TALKING once to allow sound, then carry on.',
 };
 
-// ---------- speech recognition controller ----------
+// ---------- recording helpers ----------
+
+// Recording formats, most preferred first. iPhone Safari records audio/mp4;
+// Chrome and Firefox record audio/webm.
+const RECORDER_TYPES = ['audio/mp4', 'audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus'];
+
+export function pickRecorderType(isTypeSupported) {
+  if (typeof isTypeSupported !== 'function') return '';
+  return RECORDER_TYPES.find((t) => { try { return isTypeSupported(t); } catch { return false; } }) ?? '';
+}
+
+// The upload's Content-Type: the recorder's type without codec details.
+export function uploadType(mime) {
+  const base = String(mime || '').split(';')[0].trim().toLowerCase();
+  return base || 'audio/mp4';
+}
+
+// Mix channels to mono and resample to `rate` (linear interpolation; plenty
+// for speech recognition).
+export function toMono(channels) {
+  if (channels.length === 1) return Float32Array.from(channels[0]);
+  const out = new Float32Array(channels[0].length);
+  for (const ch of channels) for (let i = 0; i < out.length; i += 1) out[i] += ch[i] / channels.length;
+  return out;
+}
+
+export function resample(samples, fromRate, toRate) {
+  if (fromRate === toRate) return Float32Array.from(samples);
+  const length = Math.max(1, Math.round(samples.length * toRate / fromRate));
+  const out = new Float32Array(length);
+  const step = fromRate / toRate;
+  for (let i = 0; i < length; i += 1) {
+    const pos = i * step;
+    const a = Math.floor(pos);
+    const b = Math.min(a + 1, samples.length - 1);
+    const frac = pos - a;
+    out[i] = (samples[a] ?? 0) * (1 - frac) + (samples[b] ?? 0) * frac;
+  }
+  return out;
+}
+
+// 16-bit PCM mono WAV. Every speech recogniser accepts it, whatever format
+// the phone recorded in.
+export function encodeWav(samples, sampleRate) {
+  const buffer = new ArrayBuffer(44 + samples.length * 2);
+  const view = new DataView(buffer);
+  const text = (offset, s) => { for (let i = 0; i < s.length; i += 1) view.setUint8(offset + i, s.charCodeAt(i)); };
+  text(0, 'RIFF');
+  view.setUint32(4, 36 + samples.length * 2, true);
+  text(8, 'WAVE');
+  text(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true); // PCM
+  view.setUint16(22, 1, true); // mono
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  text(36, 'data');
+  view.setUint32(40, samples.length * 2, true);
+  for (let i = 0; i < samples.length; i += 1) {
+    const v = Math.max(-1, Math.min(1, samples[i]));
+    view.setInt16(44 + i * 2, v < 0 ? v * 0x8000 : v * 0x7fff, true);
+  }
+  return new Uint8Array(buffer);
+}
+
+// A short silent WAV, played on a tap so iPhone Safari lets the page play
+// the teacher's audio later without another tap.
+export function silentWav() {
+  return encodeWav(new Float32Array(800), 16000);
+}
+
+// ---------- end of speech ----------
 //
-// One recogniser per listening turn. Every Web Speech event is reported, and
-// the turn ends in exactly one outcome:
-//   onFinal({ text, alternatives, confidence, lang })  a non-empty transcript
-//   onEmpty(reason)   'no-speech' (nothing heard) or 'no-result' (sound, no words)
-//   onError(code)     a recognition error (not-allowed, audio-capture, network, ...)
-// Events from an older recogniser (after stop() or a new listen()) are ignored,
-// so switching language never leaves a stale instance feeding the page.
-// Watchdogs make sure LISTENING never hangs silently.
+// Fed the microphone level every ~100 ms. Says 'speech' when Roy starts
+// talking, 'done' after he has been quiet for `quietMs`, and 'nothing' if no
+// speech starts within `waitMs`. `maxMs` caps a recording.
 
-export const EVENTS = ['start', 'audiostart', 'soundstart', 'speechstart', 'result', 'speechend', 'soundend', 'audioend', 'nomatch', 'error', 'end'];
-
-export class VoiceInput {
-  // The default timers are wrapped: browsers throw "Illegal invocation" when
-  // setTimeout/clearTimeout are called as methods of another object.
-  constructor(Recognition, { setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = (id) => clearTimeout(id), log = () => {}, limits = {} } = {}) {
-    this.Recognition = Recognition;
-    this.setTimer = setTimer;
-    this.clearTimer = clearTimer;
-    this.log = log;
-    this.limits = { startMs: 5000, silentMicMs: 7000, afterSpeechMs: 8000, totalMs: 30000, ...limits };
-    this.turn = 0;
-    this.active = null;
+export class SilenceDetector {
+  constructor({ threshold = 0.02, quietMs = 1500, waitMs = 8000, maxMs = 30000, minSpeechMs = 250 } = {}) {
+    Object.assign(this, { threshold, quietMs, waitMs, maxMs, minSpeechMs });
+    this.startedAt = null;
+    this.loudSince = null;
+    this.speaking = false;
+    this.lastLoud = null;
   }
 
-  get available() { return Boolean(this.Recognition); }
-  get listening() { return Boolean(this.active); }
-
-  // Starts a listening turn. Any turn already running is stopped first.
-  listen(lang, handlers = {}) {
-    this.stop();
-    if (!this.Recognition) { handlers.onError?.('unavailable'); return null; }
-    const turn = ++this.turn;
-    const rec = new this.Recognition();
-    rec.lang = recognitionLang(lang);
-    rec.continuous = false; // one answer per turn; the page starts the next turn
-    rec.interimResults = true;
-    rec.maxAlternatives = 5;
-    const t = { turn, rec, lang: rec.lang, finalText: '', interim: '', alternatives: [], confidence: null, error: null, heardSound: false, heardSpeech: false, done: false, timers: {} };
-    this.active = t;
-    const live = () => this.active === t; // ignore events from stale recognisers
-    const status = (kind, detail) => handlers.onStatus?.(kind, detail);
-    const timer = (name, ms, fn) => { this.clearTimer(t.timers[name]); t.timers[name] = this.setTimer(() => live() && fn(), ms); };
-    const clear = (name) => { this.clearTimer(t.timers[name]); delete t.timers[name]; };
-
-    for (const name of EVENTS) {
-      rec[`on${name}`] = (e) => {
-        if (!live()) return;
-        this.log(`[speech] ${name}${name === 'error' ? ` ${e?.error}${e?.message ? ` (${e.message})` : ''}` : ''}`);
-        this.#handle(name, e, t, { status, timer, clear, handlers });
-      };
+  feed(level, now) {
+    if (this.startedAt === null) this.startedAt = now;
+    const loud = level >= this.threshold;
+    if (loud) {
+      this.lastLoud = now;
+      if (this.loudSince === null) this.loudSince = now;
+      if (!this.speaking && now - this.loudSince >= this.minSpeechMs) { this.speaking = true; return 'speech'; }
+    } else {
+      this.loudSince = null;
     }
-
-    timer('start', this.limits.startMs, () => this.#fail(t, 'start-timeout', handlers));
-    timer('total', this.limits.totalMs, () => this.#settle(t, 'timeout', handlers));
-    status('starting', { lang: rec.lang });
-    try {
-      rec.start();
-    } catch (err) {
-      this.log(`[speech] start() threw: ${err?.name} ${err?.message}`);
-      this.#fail(t, 'start-failed', handlers);
-    }
-    return turn;
-  }
-
-  // Stops the current turn without reporting an outcome.
-  stop() {
-    const t = this.active;
-    if (!t) return;
-    this.active = null;
-    this.#clearAll(t);
-    try { t.rec.abort(); } catch { /* already stopped */ }
-  }
-
-  #handle(name, e, t, { status, timer, clear, handlers }) {
-    switch (name) {
-      case 'start':
-        clear('start');
-        status('listening', { lang: t.lang });
-        break;
-      case 'audiostart':
-        status('mic-on');
-        // The mic is open; if no sound arrives, the wrong input device may be selected.
-        timer('silentMic', this.limits.silentMicMs, () => status('no-sound-yet'));
-        break;
-      case 'soundstart':
-        t.heardSound = true;
-        clear('silentMic');
-        status('sound');
-        break;
-      case 'speechstart':
-        t.heardSpeech = true;
-        clear('silentMic');
-        status('speech');
-        break;
-      case 'result': {
-        clear('afterSpeech');
-        let interim = '';
-        for (let i = e.resultIndex ?? 0; i < e.results.length; i++) {
-          const r = e.results[i];
-          if (r.isFinal) {
-            t.finalText += r[0].transcript;
-            t.confidence = r[0].confidence ?? null;
-            t.alternatives = Array.from({ length: r.length }, (_, k) => r[k]?.transcript).slice(1).filter(Boolean);
-          } else {
-            interim += r[0].transcript;
-          }
-        }
-        t.interim = interim;
-        const text = (t.finalText + interim).trim();
-        if (text) status(interim ? 'interim' : 'final', { text });
-        break;
-      }
-      case 'speechend':
-        status('speech-end');
-        // Chrome normally delivers the result and ends soon after speech stops.
-        timer('afterSpeech', this.limits.afterSpeechMs, () => this.#settle(t, 'no-result', handlers));
-        break;
-      case 'nomatch':
-        t.error = t.error ?? 'no-result';
-        break;
-      case 'error':
-        // no-speech and aborted are not failures: onend decides what happened.
-        if (e?.error === 'no-speech' || e?.error === 'aborted') t.silent = e.error;
-        else t.error = e?.error || 'unknown';
-        break;
-      case 'end':
-        this.#finish(t, handlers);
-        break;
-      default:
-        break;
-    }
-  }
-
-  #finish(t, handlers) {
-    if (t.done) return;
-    t.done = true;
-    this.#clearAll(t);
-    if (this.active === t) this.active = null;
-    handlers.onStatus?.('ended');
-    const text = t.finalText.trim() || t.interim.trim(); // Chrome occasionally ends with only an interim result
-    if (text) return handlers.onFinal?.({ text, alternatives: t.alternatives, confidence: t.confidence, lang: t.lang });
-    if (t.error) return handlers.onError?.(t.error);
-    handlers.onEmpty?.(t.heardSpeech || t.heardSound ? 'no-result' : 'no-speech');
-  }
-
-  // Ends a turn that stalled: use whatever was recognised, otherwise report `code`.
-  #settle(t, code, handlers) {
-    if ((t.finalText + t.interim).trim()) {
-      try { t.rec.abort(); } catch { /* ignore */ }
-      return this.#finish(t, handlers);
-    }
-    return this.#fail(t, code, handlers);
-  }
-
-  #fail(t, code, handlers) {
-    if (t.done) return;
-    t.done = true;
-    this.#clearAll(t);
-    if (this.active === t) this.active = null;
-    try { t.rec.abort(); } catch { /* ignore */ }
-    handlers.onStatus?.('ended');
-    handlers.onError?.(code);
-  }
-
-  #clearAll(t) {
-    for (const id of Object.values(t.timers)) this.clearTimer(id);
-    t.timers = {};
+    if (now - this.startedAt >= this.maxMs) return this.speaking ? 'done' : 'nothing';
+    if (this.speaking && !loud && now - this.lastLoud >= this.quietMs) return 'done';
+    if (!this.speaking && now - this.startedAt >= this.waitMs) return 'nothing';
+    return null;
   }
 }
 
-// What the page says for each recognition status.
-export function recognitionStatusText(kind, detail = {}, { language } = {}) {
-  switch (kind) {
-    case 'starting': return 'Starting the microphone…';
-    case 'listening': return `Listening in ${language ?? detail.lang}. Speak now.`;
-    case 'mic-on': return `Microphone on (${language ?? ''}). Speak now.`.replace(' ()', '');
-    case 'no-sound-yet': return 'The microphone is on but no sound is reaching it. Check that the right microphone is selected (click the mic icon in the address bar) and that it is not muted.';
-    case 'sound': return 'Hearing sound…';
-    case 'speech': return 'Hearing speech…';
-    case 'interim': return 'Recognising…';
-    case 'final': return 'Got it.';
-    case 'speech-end': return 'Processing what you said…';
-    case 'ended': return '';
-    default: return '';
-  }
+// Root-mean-square level of a block of samples (0 silent … 1 full scale).
+export function rms(samples) {
+  if (!samples?.length) return 0;
+  let sum = 0;
+  for (const v of samples) sum += v * v;
+  return Math.sqrt(sum / samples.length);
+}
+
+// The line to show for a teacher reply: the on-screen text if the tutor gave
+// one, else what is said.
+export function lineText(seg) {
+  return seg?.show ?? seg?.text ?? '';
+}
+
+// Playback speed for a line: slow lines are played a little slower.
+export function playbackRate(seg) {
+  const r = Number(seg?.rate);
+  return Number.isFinite(r) && r > 0 && r < 1 ? Math.max(0.7, r) : 1;
 }

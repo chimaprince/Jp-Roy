@@ -10,6 +10,7 @@ import { loadConfiguredCourses } from './src/curriculum.js';
 import { createTeacher } from './src/teacher.js';
 import { Tutor } from './src/tutor.js';
 import { serverUrls } from './src/network.js';
+import { createVoice, SpeechStore, VoiceError, audioMime, MAX_AUDIO_BYTES } from './src/voice.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(here, 'public');
@@ -44,13 +45,17 @@ if (teacher.configured) {
   console.error('Qwen is not configured: DASHSCOPE_API_KEY is missing.');
   console.error('  The tutor will not run lessons until it is set. There is no scripted fallback.');
 }
+const voice = createVoice();
+const speech = new SpeechStore(voice);
+console.log(`speech recognition: Qwen ${voice.asrModel} at ${voice.asrBaseURL}`);
+console.log(`teacher voice: Qwen ${voice.ttsModel} (voice ${voice.ttsVoice}) at ${voice.ttsURL}`);
 const tutor = new Tutor({ db, teacher, userId: process.env.TUTOR_USER_ID || 'roy', userName: process.env.TUTOR_USER_NAME || 'Roy' });
 
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml' };
 const SECURITY_HEADERS = {
   'X-Content-Type-Options': 'nosniff',
   'Referrer-Policy': 'no-referrer',
-  'Content-Security-Policy': "default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data:",
+  'Content-Security-Policy': "default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data:; media-src 'self' blob:",
 };
 
 function send(res, status, body, type = 'application/json; charset=utf-8') {
@@ -67,6 +72,17 @@ async function readJson(req) {
   return raw ? JSON.parse(raw) : {};
 }
 
+async function readAudio(req) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > MAX_AUDIO_BYTES) throw new VoiceError('audio_too_large', 'The recording is too long. Keep answers under about a minute.', { status: 413 });
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
+}
+
 function serveStatic(req, res) {
   const url = new URL(req.url, 'http://localhost');
   const file = path.normalize(path.join(publicDir, url.pathname === '/' ? 'index.html' : url.pathname));
@@ -81,26 +97,61 @@ function serveStatic(req, res) {
 let queue = Promise.resolve();
 const serial = (fn) => (queue = queue.then(fn, fn));
 
+const withVoice = (result) => speech.attach(result);
+
 const routes = {
-  'GET /api/status': () => tutor.status(),
-  'POST /api/session/start': () => tutor.start(),
-  'POST /api/session/message': (body) => tutor.message(String(body.text ?? '').slice(0, 500), {
+  'GET /api/status': () => ({ ...tutor.status(), voice: { configured: voice.configured, asrModel: voice.asrModel, ttsModel: voice.ttsModel } }),
+  'POST /api/session/start': async () => withVoice(await tutor.start()),
+  'POST /api/session/message': async (body) => withVoice(await tutor.message(String(body.text ?? '').slice(0, 500), {
     source: body.source === 'voice' ? 'voice' : 'text',
     alternatives: Array.isArray(body.alternatives) ? body.alternatives.slice(0, 5).map((a) => String(a).slice(0, 500)) : [],
     confidence: Number.isFinite(body.confidence) ? body.confidence : null,
     language: typeof body.language === 'string' ? body.language.slice(0, 20) : null,
-  }),
-  'POST /api/session/end': () => tutor.end(),
+  })),
+  'POST /api/session/end': async () => withVoice(await tutor.end()),
 };
 
+// Audio routes: the raw recording in, a transcript out; and teacher audio by
+// line id. They do not touch lesson state, so they are not queued.
+async function audioRoute(req, res, url) {
+  if (req.method === 'POST' && url.pathname === '/api/voice/transcribe') {
+    const mime = audioMime(req.headers['content-type']);
+    if (!mime) throw new VoiceError('asr_bad_audio', 'Unsupported audio format.', { status: 415 });
+    const audio = await readAudio(req);
+    const lang = url.searchParams.get('lang') === 'en-US' ? 'en-US' : 'zh-CN';
+    return send(res, 200, await voice.transcribe(audio, mime, lang));
+  }
+  const m = req.method === 'GET' && url.pathname.match(/^\/api\/voice\/speech\/([a-z0-9]{1,40})$/);
+  if (m) {
+    const job = speech.get(m[1]);
+    if (!job) return send(res, 404, { error: 'That audio has expired.', code: 'tts_expired' });
+    const { audio, mime } = await job;
+    res.writeHead(200, { 'Content-Type': mime, 'Content-Length': audio.length, 'Cache-Control': 'no-store', ...SECURITY_HEADERS });
+    return res.end(audio);
+  }
+  return false;
+}
+
 async function handler(req, res) {
-  const route = routes[`${req.method} ${req.url.split('?')[0]}`];
-  if (!route) return req.method === 'GET' ? serveStatic(req, res) : send(res, 404, { error: 'Not found' });
+  const url = new URL(req.url, 'http://localhost');
+  const route = routes[`${req.method} ${url.pathname}`];
+  const isVoice = url.pathname.startsWith('/api/voice/');
+  if (!route && !isVoice) return req.method === 'GET' ? serveStatic(req, res) : send(res, 404, { error: 'Not found' });
   if (ACCESS_CODE && req.headers['x-access-code'] !== ACCESS_CODE) return send(res, 401, { error: 'Access code required' });
   try {
+    if (isVoice) {
+      if ((await audioRoute(req, res, url)) === false) send(res, 404, { error: 'Not found' });
+      return;
+    }
     const body = req.method === 'POST' ? await readJson(req) : {};
     send(res, 200, await serial(() => route(body)));
   } catch (err) {
+    if (err instanceof VoiceError) {
+      // Qwen's own error text stays in the server log.
+      console.error(`[voice] ${err.code}: ${err.message}${err.detail ? ` ${err.detail}` : ''}`);
+      if (err.status === 413) req.resume();
+      return send(res, err.status, { error: err.message, code: err.code });
+    }
     console.error(err);
     if (err.code === 'ai_not_configured') return send(res, 503, { error: err.message, code: err.code });
     if (err instanceof OpenAI.APIError) {

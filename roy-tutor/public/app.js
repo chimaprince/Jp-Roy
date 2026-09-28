@@ -1,43 +1,46 @@
 // Voice loop. The microphone button drives everything:
 //
-//   IDLE → (tap) → TEACHER RESPONSE → LISTENING → PROCESSING → TEACHER RESPONSE → LISTENING AGAIN …
+//   IDLE → (tap) → TEACHER THINKING → TEACHER SPEAKING → LISTENING
+//        → AUDIO CAPTURED → TRANSCRIPT RECEIVED → TEACHER THINKING
+//        → PREPARING TEACHER VOICE → TEACHER AUDIO READY → TEACHER SPEAKING → LISTENING …
 //
-// Speech is turned into text by the browser's speech recogniser. The text,
-// the recogniser's other guesses and its confidence go to the server, where
-// the tutor evaluates them. No API keys live here.
+// The page records Roy's answer and uploads it; the server has Qwen turn it
+// into text, and the text goes to the tutor exactly like a typed answer. The
+// teacher's replies come back as Qwen audio from the server. The browser's own
+// speech recognition and speech synthesis are not used. No API keys live here.
 
-import { recognitionLang, LANGUAGE_LABEL, otherLanguage, lessonStateText, speechParts, friendlyError, RECOGNITION_ERRORS, VoiceInput, recognitionStatusText } from './voice-core.js';
+import {
+  recognitionLang, LANGUAGE_LABEL, otherLanguage, lessonStateText, friendlyError, VOICE_ERRORS,
+  STATES, BUSY_STATES, pickRecorderType, uploadType, toMono, resample, encodeWav, silentWav,
+  SilenceDetector, rms, lineText, playbackRate,
+} from './voice-core.js';
 
 const $ = (id) => document.getElementById(id);
 const talkBtn = $('talk');
+const retryBtn = $('retry');
 const micStateEl = $('mic-state');
 const statusEl = $('status');
 const heardEl = $('heard');
 const logEl = $('log');
 const lessonEl = $('lesson-state');
 const micLangBtn = $('mic-lang');
-const CAN_SPEAK = 'speechSynthesis' in window && typeof SpeechSynthesisUtterance !== 'undefined';
 
-const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-// Every recognition event is logged to the browser console as "[speech] ...".
-const voice = new VoiceInput(Recognition, { log: (m) => console.log(m) });
-
-const STATES = {
-  idle: { badge: 'IDLE', button: '🎙 START TALKING' },
-  speaking: { badge: 'TEACHER SPEAKING', button: '🔊 TEACHER SPEAKING' },
-  listening: { badge: 'LISTENING', button: '🎙 LISTENING…' },
-  processing: { badge: 'THINKING', button: '⏳ THINKING…' },
-};
+const CAN_RECORD = Boolean(navigator.mediaDevices?.getUserMedia && window.MediaRecorder);
+const ASR_RATE = 16000;
 
 let state = 'idle';
 let sessionOpen = false; // the tutor has asked something and is waiting for an answer
 let listenLang = null; // the language the lesson expects next (from the server)
-let langOverride = null; // Roy switched the microphone language for this turn
+let langOverride = null; // Roy switched the answer language for this turn
 let mode = null;
-let ttsWarned = false;
 let turnsHeard = 0;
 let silentRetries = 0;
-let speechRun = 0; // bumps to cancel a speech sequence in progress
+let speechRun = 0; // bumps to cancel teacher audio in progress
+let lastRecording = null; // kept so a failed transcription can be retried
+let voiceWarned = false;
+
+// Short pauses so each step is visible on the badge.
+const pause = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function accessHeaders() {
   let code = '';
@@ -45,14 +48,11 @@ function accessHeaders() {
   return code ? { 'X-Access-Code': code } : {};
 }
 
-async function api(method, url, body) {
+// fetch with the access code; asks for the code once on 401.
+async function request(url, init = {}) {
   let res;
   try {
-    res = await fetch(url, {
-    method,
-      headers: { 'Content-Type': 'application/json', ...accessHeaders() },
-      body: body ? JSON.stringify(body) : undefined,
-    });
+    res = await fetch(url, { ...init, headers: { ...(init.headers ?? {}), ...accessHeaders() } });
   } catch (err) {
     throw Object.assign(new TypeError(err.message || 'Failed to fetch'), { code: 'network' });
   }
@@ -60,13 +60,22 @@ async function api(method, url, body) {
     const code = prompt('Access code');
     if (code) {
       try { localStorage.setItem('tutorAccessCode', code); } catch { /* ignore */ }
-      return api(method, url, body);
+      return request(url, init);
     }
   }
   if (!res.ok) {
     const info = await res.json().catch(() => ({}));
     throw Object.assign(new Error(info.error || res.statusText), { code: info.code ?? (res.status >= 500 ? 'server_error' : null), status: res.status });
   }
+  return res;
+}
+
+async function api(method, url, body) {
+  const res = await request(url, {
+    method,
+    headers: { 'Content-Type': 'application/json' },
+    body: body ? JSON.stringify(body) : undefined,
+  });
   return res.json();
 }
 
@@ -81,35 +90,30 @@ function setState(next, { again = false } = {}) {
   talkBtn.textContent = s.button;
   talkBtn.setAttribute('aria-pressed', String(next !== 'idle'));
   statusEl.classList.toggle('listening', next === 'listening');
+  if (next !== 'idle') retryBtn.hidden = true;
 }
 
 function setStatus(text) { statusEl.textContent = text; }
 
-function showHeard(text, final = false) {
+function showHeard(text) {
   heardEl.hidden = !text;
-  heardEl.textContent = text ? `${final ? 'You said' : 'Hearing'}: “${text}”` : '';
+  heardEl.textContent = text ? `You said: “${text}”` : '';
 }
 
-// The language the microphone uses for the next answer: the lesson's choice,
-// unless Roy switched it for this turn.
 function micLang() {
   return langOverride ?? listenLang;
 }
 
-function listeningHint() {
-  const lang = micLang();
-  const heardAs = `Mic set to ${LANGUAGE_LABEL[lang] ?? lang} (${recognitionLang(lang)}).`;
-  if (langOverride) return `${heardAs} Switched for this answer only.`;
-  if (mode === 'pronunciation') return `${heardAs} Say the Mandarin term.`;
-  if (lang?.startsWith('zh')) return `${heardAs} Answer in Mandarin.`;
-  return `${heardAs} Answer in English, in your own words.`;
+function hintFor(lang) {
+  if (mode === 'pronunciation') return 'Say the Mandarin term.';
+  return lang?.startsWith('zh') ? 'Answer in Mandarin.' : 'Answer in English, in your own words.';
 }
 
 function renderMicLang() {
   const lang = micLang();
   micLangBtn.hidden = !sessionOpen || !lang;
   if (!lang) return;
-  micLangBtn.textContent = `Mic: ${LANGUAGE_LABEL[lang]} · switch to ${LANGUAGE_LABEL[otherLanguage(lang)]}`;
+  micLangBtn.textContent = `Answer language: ${LANGUAGE_LABEL[lang]} · switch to ${LANGUAGE_LABEL[otherLanguage(lang)]}`;
   micLangBtn.setAttribute('aria-pressed', String(Boolean(langOverride)));
 }
 
@@ -147,61 +151,222 @@ function renderView(view) {
   $('card-tag').hidden = !tag;
 }
 
-// ---------- speech out ----------
-
-function pickVoice(lang) {
-  const voices = speechSynthesis.getVoices();
-  const prefix = lang === 'zh' ? 'zh' : 'en';
-  return voices.find((v) => v.lang.replace('_', '-') === (lang === 'zh' ? 'zh-CN' : 'en-US'))
-    || voices.find((v) => v.lang.toLowerCase().startsWith(prefix));
+function noteOnce(message) {
+  if (voiceWarned) return;
+  voiceWarned = true;
+  addLog('note', message);
 }
 
-function speakSegment(seg) {
-  return new Promise((resolve) => {
-    if (!CAN_SPEAK) return resolve();
-    const u = new SpeechSynthesisUtterance(seg.text);
-    u.lang = seg.lang === 'zh' ? 'zh-CN' : 'en-US';
-    const voice = pickVoice(seg.lang);
-    if (voice) u.voice = voice;
-    u.rate = seg.rate ?? (seg.lang === 'zh' ? 0.85 : 1);
-    // Some browsers never fire onend; don't let that stall the conversation.
-    const timer = setTimeout(resolve, 2500 + seg.text.length * 180 / u.rate);
-    u.onend = () => { clearTimeout(timer); resolve(); };
-    u.onerror = (e) => {
-      clearTimeout(timer);
-      if (!ttsWarned && e.error && e.error !== 'interrupted' && e.error !== 'canceled') {
-        ttsWarned = true;
-        addLog('note', `The browser could not play the teacher's voice (${e.error}). Read the replies here.`);
-      }
-      resolve();
-    };
-    speechSynthesis.speak(u);
+// ---------- teacher audio (Qwen TTS, played from the server) ----------
+
+// One audio element for the whole session. iPhone Safari only lets a page
+// play sound after a tap; playing a silent clip on each tap keeps this
+// element allowed to play the teacher's audio later.
+const player = new Audio();
+player.preload = 'auto';
+let silentUrl = null;
+
+function unlockAudio() {
+  try {
+    silentUrl ??= URL.createObjectURL(new Blob([silentWav()], { type: 'audio/wav' }));
+    if (player.paused) {
+      player.src = silentUrl;
+      player.play().catch(() => { /* reported later if it matters */ });
+    }
+  } catch { /* ignore */ }
+  audioContext()?.resume?.().catch(() => {});
+}
+
+async function fetchAudio(id) {
+  const res = await request(`/api/voice/speech/${encodeURIComponent(id)}`);
+  return URL.createObjectURL(await res.blob());
+}
+
+function playUrl(url, rate, run) {
+  return new Promise((resolve, reject) => {
+    const cancel = setInterval(() => { if (run !== speechRun) { player.pause(); finish(); } }, 150);
+    function cleanup() { clearInterval(cancel); player.onended = null; player.onerror = null; }
+    function finish() { cleanup(); resolve(); }
+    player.onended = finish;
+    player.onerror = () => { cleanup(); reject(Object.assign(new Error('The teacher audio could not be played.'), { code: 'tts_failed' })); };
+    player.src = url;
+    player.playbackRate = rate;
+    player.play().catch((err) => {
+      cleanup();
+      reject(Object.assign(new Error(err?.message || 'playback failed'), { code: err?.name === 'NotAllowedError' ? 'play-blocked' : 'tts_failed' }));
+    });
   });
 }
 
+// Shows the teacher's reply, then plays each line's Qwen audio in order.
+// Returns true if it finished (not interrupted by a tap or blocked).
 async function speakAll(segments) {
-  addLog('tutor', segments.map((seg) => seg.show ?? seg.text).join(' '));
-  if (!CAN_SPEAK) {
-    if (!ttsWarned) { ttsWarned = true; addLog('note', "This browser can't speak the teacher's replies. Read them here."); }
+  if (!segments.length) return true;
+  addLog('tutor', segments.map(lineText).join(' '));
+  const run = ++speechRun;
+  const lines = segments.filter((s) => s.audio);
+  if (!lines.length) {
+    noteOnce('No teacher audio for this reply (Qwen voice is not configured on the server). Read the replies here.');
     return true;
   }
-  const run = ++speechRun;
-  setState('speaking');
-  setStatus('Tap the button to skip ahead and answer.');
-  // Each line is split by script: Chinese characters in a Chinese voice, the rest in English.
-  for (const part of segments.flatMap(speechParts)) {
-    if (run !== speechRun) return false;
-    await speakSegment(part);
+  setState('preparing');
+  setStatus("Preparing the teacher's voice (Qwen)…");
+  // The server is already producing every line: fetch them all, play in order.
+  const jobs = lines.map((s) => fetchAudio(s.audio).then((url) => ({ url }), (err) => ({ err })));
+  let failed = null;
+  for (let i = 0; i < lines.length; i += 1) {
+    const got = await jobs[i];
+    if (run !== speechRun) break;
+    if (got.err) { failed ??= got.err; continue; }
+    if (state === 'preparing') {
+      setState('ready');
+      setStatus('Teacher audio ready.');
+      await pause(300);
+      if (run !== speechRun) break;
+    }
+    setState('speaking');
+    setStatus('Tap the button to skip ahead and answer.');
+    try {
+      await playUrl(got.url, playbackRate(lines[i]), run);
+    } catch (err) {
+      failed ??= err;
+      if (err.code === 'play-blocked') break;
+    }
+  }
+  Promise.all(jobs).then((all) => all.forEach((r) => r.url && URL.revokeObjectURL(r.url)));
+  if (failed) {
+    console.error('[voice] teacher audio failed:', failed);
+    addLog('note', friendlyError(failed));
+    if (failed.code === 'play-blocked') { setState('idle'); setStatus(VOICE_ERRORS['play-blocked']); return false; }
   }
   return run === speechRun;
 }
 
 function stopSpeaking() {
   speechRun += 1;
-  if ('speechSynthesis' in window) speechSynthesis.cancel();
+  if (!player.paused) player.pause();
 }
 
-// ---------- speech in ----------
+// ---------- Roy's answer (recorded here, recognised by Qwen on the server) ----------
+
+let micStream = null;
+let ctx = null;
+
+function audioContext() {
+  if (!ctx) {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (Ctx) ctx = new Ctx();
+  }
+  return ctx;
+}
+
+// The microphone stays open for the session, so later answers need no tap
+// and no new permission prompt.
+async function openMic() {
+  if (micStream?.getAudioTracks().some((t) => t.readyState === 'live')) return micStream;
+  micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
+  return micStream;
+}
+
+function releaseMic() {
+  micStream?.getTracks().forEach((t) => t.stop());
+  micStream = null;
+}
+
+function micErrorCode(err) {
+  if (err?.name === 'NotAllowedError' || err?.name === 'SecurityError') return 'not-allowed';
+  if (err?.name === 'NotFoundError' || err?.name === 'OverconstrainedError') return 'no-mic';
+  if (err?.name === 'NotReadableError' || err?.name === 'AbortError') return 'mic-busy';
+  return 'unsupported';
+}
+
+let recording = null; // { stop(reason) } while LISTENING
+
+// Records until Roy stops talking or taps DONE TALKING. Resolves with
+// { blob, type, spoke, reason }: spoke is false if no speech was detected;
+// reason 'cancel' means the recording was abandoned.
+function record(stream) {
+  return new Promise((resolve, reject) => {
+    const type = pickRecorderType(window.MediaRecorder.isTypeSupported?.bind(window.MediaRecorder));
+    let rec;
+    try { rec = new MediaRecorder(stream, type ? { mimeType: type } : undefined); } catch (err) { reject(err); return; }
+    const chunks = [];
+    const detector = new SilenceDetector();
+    let spoke = false;
+    let endReason = null;
+    let analyser = null;
+    let source = null;
+    const ac = audioContext();
+    if (ac) {
+      try {
+        source = ac.createMediaStreamSource(stream);
+        analyser = ac.createAnalyser();
+        analyser.fftSize = 2048;
+        source.connect(analyser);
+      } catch { analyser = null; }
+    }
+    const buf = new Float32Array(2048);
+    const tick = setInterval(() => {
+      if (!analyser) return;
+      analyser.getFloatTimeDomainData(buf);
+      const verdict = detector.feed(rms(buf), performance.now());
+      if (verdict === 'speech') { spoke = true; setStatus('Hearing you… pause when you finish, or tap DONE TALKING.'); }
+      if (verdict === 'done' || verdict === 'nothing') finish(verdict);
+    }, 100);
+    // Hard stop, also when level detection is unavailable.
+    const cap = setTimeout(() => finish('max'), 31000);
+    const result = () => ({ blob: new Blob(chunks, { type: rec.mimeType || type }), type: rec.mimeType || type, spoke, reason: endReason });
+    function finish(reason) {
+      if (endReason) return;
+      endReason = reason;
+      if (recording?.stop === finish) recording = null;
+      clearInterval(tick);
+      clearTimeout(cap);
+      try { source?.disconnect(); } catch { /* ignore */ }
+      // A tap or the time limit sends what was recorded, even if the level
+      // detector missed the speech (for example a very quiet voice).
+      if (reason === 'tap' || reason === 'max') spoke = true;
+      if (reason === 'nothing' || reason === 'cancel') spoke = false;
+      if (rec.state !== 'inactive') rec.stop();
+      else resolve(result());
+    }
+    rec.ondataavailable = (e) => { if (e.data?.size) chunks.push(e.data); };
+    rec.onstop = () => { endReason ??= 'stopped'; resolve(result()); };
+    rec.onerror = (e) => { finish('cancel'); reject(e.error ?? new Error('recorder error')); };
+    rec.start();
+    recording = { stop: finish };
+  });
+}
+
+// The phone's recording (mp4 on iPhone, webm elsewhere) → 16 kHz mono WAV,
+// which Qwen accepts everywhere. If the browser can't decode its own
+// recording, the original is uploaded instead.
+async function toWav(blob) {
+  const ac = audioContext();
+  if (!ac) return null;
+  try {
+    const data = await blob.arrayBuffer();
+    const decoded = await new Promise((resolve, reject) => {
+      const p = ac.decodeAudioData(data, resolve, reject);
+      p?.then?.(resolve, reject);
+    });
+    const channels = Array.from({ length: decoded.numberOfChannels }, (_, i) => decoded.getChannelData(i));
+    const samples = resample(toMono(channels), decoded.sampleRate, ASR_RATE);
+    return new Blob([encodeWav(samples, ASR_RATE)], { type: 'audio/wav' });
+  } catch (err) {
+    console.warn('[voice] could not convert the recording to WAV; uploading it as recorded', err);
+    return null;
+  }
+}
+
+async function transcribe(upload) {
+  const res = await request(`/api/voice/transcribe?lang=${encodeURIComponent(upload.lang)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': upload.type },
+    body: upload.blob,
+  });
+  return res.json();
+}
 
 function openTypeFallback(message) {
   document.querySelector('.type-instead').open = true;
@@ -209,58 +374,75 @@ function openTypeFallback(message) {
   setStatus(message);
 }
 
-function listen(waited = 0) {
+async function listen() {
   const lang = micLang();
   if (!sessionOpen || !lang) { setState('idle'); setStatus('Tap START TALKING to continue.'); return; }
-  // Don't open the microphone while the teacher's voice is still playing:
-  // the recogniser would hear the teacher instead of Roy.
-  if (CAN_SPEAK && speechSynthesis.speaking && waited < 3000) { setTimeout(() => listen(waited + 250), 250); return; }
-  if (!window.isSecureContext) { openTypeFallback(RECOGNITION_ERRORS['insecure-context']); return; }
-  if (!voice.available) {
-    openTypeFallback('Speech recognition is not available in this browser. Use Chrome or Edge for voice, or type your answer below.');
+  if (!window.isSecureContext) { openTypeFallback(VOICE_ERRORS['insecure-context']); return; }
+  if (!CAN_RECORD) { openTypeFallback(VOICE_ERRORS.unsupported); return; }
+  let stream;
+  try {
+    stream = await openMic();
+  } catch (err) {
+    console.error('[voice] microphone failed:', err);
+    const code = micErrorCode(err);
+    if (code === 'mic-busy') { setState('idle'); setStatus(VOICE_ERRORS[code]); } else openTypeFallback(VOICE_ERRORS[code]);
     return;
   }
-  const again = turnsHeard > 0;
-  setState('listening', { again });
+  setState('listening', { again: turnsHeard > 0 });
   showHeard('');
-  const label = `${LANGUAGE_LABEL[lang] ?? lang} (${recognitionLang(lang)})`;
-  voice.listen(lang, {
-    onStatus(kind, detail) {
-      if (kind === 'interim' || kind === 'final') { showHeard(detail.text, kind === 'final'); return; }
-      const text = recognitionStatusText(kind, detail, { language: label });
-      if (kind === 'listening' || kind === 'mic-on') setStatus(`${text} ${langOverride ? 'Switched for this answer only.' : hintFor(lang)} Tap the button to pause.`);
-      else if (text) setStatus(text);
-    },
-    onFinal({ text, alternatives, confidence, lang: usedLang }) {
-      silentRetries = 0;
-      turnsHeard += 1;
-      showHeard(text, true);
-      send(text, { source: 'voice', alternatives, confidence, language: usedLang });
-    },
-    onEmpty(reason) {
-      // Nothing to send: never post an empty transcript. Retry a couple of times on silence.
-      if (reason === 'no-speech' && silentRetries < 2) { silentRetries += 1; listen(3000); return; }
-      setState('idle');
-      setStatus(reason === 'no-result'
-        ? RECOGNITION_ERRORS['no-result']
-        : "I didn't hear anything. Check the microphone, then tap START TALKING and speak.");
-    },
-    onError(code) {
-      if (code === 'unavailable') { openTypeFallback('Speech recognition is not available in this browser. Use Chrome or Edge for voice, or type your answer below.'); return; }
-      const message = RECOGNITION_ERRORS[code] ?? `Speech recognition stopped with the error "${code}". Tap START TALKING to try again, or type below.`;
-      if (['not-allowed', 'service-not-allowed', 'audio-capture', 'network'].includes(code)) openTypeFallback(message);
-      else { setState('idle'); setStatus(message); }
-    },
-  });
+  setStatus(`Listening (${LANGUAGE_LABEL[lang]}). ${langOverride ? 'Switched for this answer only. ' : ''}${hintFor(lang)} Tap DONE TALKING when you finish.`);
+  let rec;
+  try {
+    rec = await record(stream);
+  } catch (err) {
+    console.error('[voice] recording failed:', err);
+    setState('idle');
+    setStatus(VOICE_ERRORS['mic-busy']);
+    return;
+  }
+  if (rec.reason === 'cancel') return; // switched language, or a typed answer took over
+  if (!rec.spoke || !rec.blob.size) {
+    if (silentRetries < 1) { silentRetries += 1; listen(); return; }
+    setState('idle');
+    setStatus(VOICE_ERRORS['no-speech']);
+    return;
+  }
+  silentRetries = 0;
+  setState('captured');
+  setStatus('Got your answer. Sending it to Qwen speech recognition…');
+  const wav = await toWav(rec.blob);
+  lastRecording = wav ? { blob: wav, type: 'audio/wav', lang } : { blob: rec.blob, type: uploadType(rec.type), lang };
+  await recognise(lastRecording);
 }
 
-function hintFor(lang) {
-  if (mode === 'pronunciation') return 'Say the Mandarin term.';
-  return lang?.startsWith('zh') ? 'Answer in Mandarin.' : 'Answer in English, in your own words.';
+async function recognise(upload) {
+  setState('captured');
+  setStatus('Sending your answer to Qwen speech recognition…');
+  let result;
+  try {
+    result = await transcribe(upload);
+  } catch (err) {
+    console.error('[voice] transcription failed:', err);
+    if (err.code === 'ai_not_configured') { openTypeFallback(friendlyError(err)); return; }
+    setState('idle');
+    setStatus(friendlyError(err));
+    // The same recording can be sent again when the service failed; a
+    // recording with no words needs a new one.
+    retryBtn.hidden = !['asr_failed', 'network', 'server_error'].includes(err.code);
+    return;
+  }
+  lastRecording = null;
+  turnsHeard += 1;
+  setState('transcribed');
+  showHeard(result.text);
+  setStatus('Transcript received.');
+  await pause(700);
+  // The transcript goes to the tutor exactly like a typed answer.
+  await send(result.text, { source: 'voice', language: result.language ?? upload.lang });
 }
 
 function stopListening() {
-  voice.stop();
+  recording?.stop('cancel');
 }
 
 // ---------- flow ----------
@@ -275,6 +457,7 @@ async function handle(result) {
   renderMicLang();
   const finished = await speakAll(result.say || []);
   if (result.ended) {
+    releaseMic();
     setState('idle');
     setStatus('Session saved. See you next time.');
     return;
@@ -288,10 +471,9 @@ async function send(text, meta = { source: 'text' }) {
   stopSpeaking();
   addLog('roy', text);
   setState('processing');
-  setStatus('Checking your answer…');
+  setStatus('The teacher is thinking…');
   try {
     const result = await api('POST', '/api/session/message', { text, ...meta });
-    showHeard('');
     await handle(result);
   } catch (err) {
     console.error('[tutor] message failed:', err);
@@ -314,32 +496,32 @@ async function startSession() {
 }
 
 talkBtn.addEventListener('click', () => {
-  if (state === 'processing') return;
-  if (state === 'speaking') { stopSpeaking(); listen(); return; }
-  if (state === 'listening') {
-    stopListening();
-    setState('idle');
-    setStatus('Paused. Tap START TALKING to carry on.');
-    showHeard('');
-    return;
-  }
+  unlockAudio();
+  if (BUSY_STATES.has(state)) return;
+  if (state === 'speaking' || state === 'ready') { stopSpeaking(); listen(); return; }
+  if (state === 'listening') { recording?.stop('tap'); return; }
   silentRetries = 0;
   if (sessionOpen && listenLang) listen();
   else startSession();
 });
 
-// Chrome listens in one language at a time. When the lesson expects Mandarin
-// but Roy wants to say something in English (or the reverse), he switches the
-// microphone for this one answer; the next teacher reply resets it.
+retryBtn.addEventListener('click', () => {
+  unlockAudio();
+  if (lastRecording && !BUSY_STATES.has(state)) recognise(lastRecording);
+});
+
+// The lesson picks the answer language (Qwen gets it as a hint). Roy can
+// switch it for one answer; the next teacher reply resets it.
 micLangBtn.addEventListener('click', () => {
   langOverride = langOverride ? null : otherLanguage(listenLang);
   renderMicLang();
   if (state === 'listening') { stopListening(); listen(); }
-  else setStatus(listeningHint());
+  else setStatus(`Answer language set to ${LANGUAGE_LABEL[micLang()]} (${recognitionLang(micLang())})${langOverride ? ' for this answer only' : ''}.`);
 });
 
 for (const btn of document.querySelectorAll('.quick button')) {
   btn.addEventListener('click', () => {
+    unlockAudio();
     if (!sessionOpen) { startSession(); return; }
     send(btn.dataset.say);
   });
@@ -347,6 +529,7 @@ for (const btn of document.querySelectorAll('.quick button')) {
 
 $('type-form').addEventListener('submit', (e) => {
   e.preventDefault();
+  unlockAudio();
   const text = $('type-input').value.trim();
   if (!text) return;
   $('type-input').value = '';
@@ -354,26 +537,15 @@ $('type-form').addEventListener('submit', (e) => {
   send(text, { source: 'text' });
 });
 
-if (CAN_SPEAK) speechSynthesis.getVoices();
 setState('idle');
 renderMicLang();
 if (!window.isSecureContext) {
   // Browsers only allow the microphone on https:// or localhost.
   document.querySelector('.type-instead').open = true;
-  setStatus(RECOGNITION_ERRORS['insecure-context']);
-} else if (!Recognition) {
+  setStatus(VOICE_ERRORS['insecure-context']);
+} else if (!CAN_RECORD) {
   document.querySelector('.type-instead').open = true;
-  setStatus('Speech recognition is not available in this browser: use Chrome or Edge for voice, or type below.');
-} else {
-  // Microphone permission (Chrome supports this query; other browsers may not).
-  navigator.permissions?.query({ name: 'microphone' }).then((perm) => {
-    const report = () => {
-      console.log(`[speech] microphone permission: ${perm.state}`);
-      if (perm.state === 'denied') setStatus(RECOGNITION_ERRORS['not-allowed']);
-    };
-    report();
-    perm.onchange = report;
-  }).catch(() => { /* permission query not supported: the first listen will tell us */ });
+  setStatus(VOICE_ERRORS.unsupported);
 }
 api('GET', '/api/status').then((s) => {
   renderStatus(s);
