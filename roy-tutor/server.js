@@ -5,7 +5,7 @@ import OpenAI from 'openai'; // HTTP client for Qwen's OpenAI-compatible API (er
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { openDb } from './src/db.js';
+import { openDb, activeCourse, entryAt } from './src/db.js';
 import { loadConfiguredCourses } from './src/curriculum.js';
 import { createTeacher } from './src/teacher.js';
 import { Tutor } from './src/tutor.js';
@@ -47,8 +47,8 @@ if (teacher.configured) {
 }
 const voice = createVoice();
 const speech = new SpeechStore(voice);
-console.log(`speech recognition: Qwen ${voice.asrModel} at ${voice.asrBaseURL}`);
-if (asrEndpointProblem(voice.asrBaseURL)) console.error(`  ${asrEndpointProblem(voice.asrBaseURL)}`);
+console.log(`speech recognition: Qwen ${voice.asrModel} at ${voice.asrURL}`);
+if (asrEndpointProblem(voice.asrURL)) console.error(`  ${asrEndpointProblem(voice.asrURL)}`);
 console.log(`teacher voice: Qwen ${voice.ttsModel} (voice ${voice.ttsVoice}) at ${voice.ttsURL}`);
 const tutor = new Tutor({ db, teacher, userId: process.env.TUTOR_USER_ID || 'roy', userName: process.env.TUTOR_USER_NAME || 'Roy' });
 
@@ -112,6 +112,18 @@ const routes = {
   'POST /api/session/end': async () => withVoice(await tutor.end()),
 };
 
+// The entry the lesson is on now, read from the curriculum (the card hides the
+// Mandarin during review; recognition context still needs it). Read only.
+function currentEntry() {
+  try {
+    const position = tutor.status().session?.card?.position;
+    const course = activeCourse(db);
+    return position && course ? entryAt(db, course.id, position) : null;
+  } catch {
+    return null;
+  }
+}
+
 // Audio routes: the raw recording in, a transcript out; and teacher audio by
 // line id. They do not touch lesson state, so they are not queued.
 async function audioRoute(req, res, url) {
@@ -120,7 +132,7 @@ async function audioRoute(req, res, url) {
     if (!mime) throw new VoiceError('asr_bad_audio', 'Unsupported audio format.', { status: 415 });
     const audio = await readAudio(req);
     const lang = url.searchParams.get('lang') === 'en-US' ? 'en-US' : 'zh-CN';
-    return send(res, 200, await voice.transcribe(audio, mime, lang));
+    return send(res, 200, await voice.transcribe(audio, mime, lang, { entry: currentEntry() }));
   }
   const m = req.method === 'GET' && url.pathname.match(/^\/api\/voice\/speech\/([a-z0-9]{1,40})$/);
   if (m) {

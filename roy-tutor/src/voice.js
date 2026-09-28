@@ -2,30 +2,59 @@
 // (TTS). The browser only records audio and plays audio; everything that needs
 // DASHSCOPE_API_KEY happens here, and the key never leaves the server.
 //
-//   ASR  qwen3-asr-flash, OpenAI-compatible chat completions with an
-//        input_audio part (Singapore: dashscope-intl.aliyuncs.com).
+//   ASR  qwen-audio-3.1-asr-flash, DashScope native multimodal-generation
+//        endpoint on the Singapore workspace host (synchronous: audio in,
+//        output.text back), with the current lesson term as context.
+//        (qwen3-asr-* models still use the OpenAI-compatible endpoint.)
 //   TTS  qwen3-tts-instruct-flash, DashScope multimodal-generation endpoint
 //        (Singapore), with speaking-style instructions for a clear, patient
 //        Mandarin teacher. Qwen
 //        returns a short-lived audio URL (or inline data); the server fetches
 //        it and relays the bytes, so the browser never sees Qwen URLs.
 
-export const ASR_DEFAULT_MODEL = 'qwen3-asr-flash';
+export const ASR_DEFAULT_MODEL = 'qwen-audio-3.1-asr-flash';
 export const ASR_DEFAULT_BASE_URL = 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1';
-// Singapore workspace-specific host (Model Studio workspace, International):
-// set QWEN_ASR_BASE_URL to this with your workspace ID filled in.
+export const NATIVE_PATH = '/api/v1/services/aigc/multimodal-generation/generation';
+// Singapore workspace-specific host (Model Studio workspace, International).
+// The native endpoint is taken from the host of QWEN_ASR_BASE_URL, unless
+// QWEN_ASR_URL gives it in full.
 export const ASR_WORKSPACE_URL_FORMAT = 'https://<WORKSPACE_ID>.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1';
+export const ASR_WORKSPACE_NATIVE_URL_FORMAT = `https://<WORKSPACE_ID>.ap-southeast-1.maas.aliyuncs.com${NATIVE_PATH}`;
+
+// qwen3-asr-* speak the OpenAI-compatible protocol; qwen-audio-*-asr and
+// others use DashScope's native multimodal-generation protocol.
+export function asrProtocol(model) {
+  return /^qwen3-asr/i.test(model) ? 'openai' : 'native';
+}
+
+// The full URL an ASR request goes to.
+export function asrEndpoint({ model, baseURL, url }) {
+  if (asrProtocol(model) === 'openai') return `${baseURL}/chat/completions`;
+  if (url) return url;
+  try { return `${new URL(baseURL).origin}${NATIVE_PATH}`; } catch { return baseURL; }
+}
 
 // A problem with the ASR endpoint setting that would fail every request, or null.
 export function asrEndpointProblem(url) {
-  if (/[<>]|WORKSPACE_ID/i.test(url)) return `QWEN_ASR_BASE_URL still contains the placeholder: put your workspace ID in (${ASR_WORKSPACE_URL_FORMAT}).`;
+  if (/[<>]|WORKSPACE_ID/i.test(url)) return `The ASR endpoint still contains the placeholder: put your workspace ID into QWEN_ASR_BASE_URL (${ASR_WORKSPACE_URL_FORMAT}).`;
   try {
     const u = new URL(url);
-    if (!/^https?:$/.test(u.protocol)) return `QWEN_ASR_BASE_URL must start with https:// (got ${u.protocol}).`;
+    if (!/^https?:$/.test(u.protocol)) return `The ASR endpoint must start with https:// (got ${u.protocol}).`;
   } catch {
-    return `QWEN_ASR_BASE_URL is not a valid URL: ${url}`;
+    return `The ASR endpoint is not a valid URL: ${url}`;
   }
   return null;
+}
+
+// Recognition context for Mandarin medical Chinese: what the lesson is about
+// and the current JH Medics term, so the recogniser expects it.
+export function asrContext(entry) {
+  const parts = ['医学中文课（JH Medics 医学术语）。学生在练习医学普通话，可能说普通话，也可能说英语。'];
+  if (entry?.mandarin) {
+    const extra = [entry.pinyin, entry.english].filter(Boolean).join('，');
+    parts.push(`当前术语：${entry.mandarin}${extra ? `（${extra}）` : ''}。`);
+  }
+  return parts.join('');
 }
 export const TTS_DEFAULT_MODEL = 'qwen3-tts-instruct-flash';
 export const TTS_DEFAULT_URL = 'https://dashscope-intl.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation';
@@ -46,6 +75,8 @@ export function voiceSettings(env = process.env) {
     apiKey: env.DASHSCOPE_API_KEY || '',
     asrModel: env.QWEN_ASR_MODEL || ASR_DEFAULT_MODEL,
     asrBaseURL: (env.QWEN_ASR_BASE_URL || ASR_DEFAULT_BASE_URL).replace(/\/+$/, ''),
+    asrURL: env.QWEN_ASR_URL || '',
+    asrContextOn: !/^(0|false|no|off)$/i.test(env.QWEN_ASR_CONTEXT || ''),
     ttsModel: env.QWEN_TTS_MODEL || TTS_DEFAULT_MODEL,
     ttsURL: env.QWEN_TTS_URL || TTS_DEFAULT_URL,
     ttsVoice: env.QWEN_TTS_VOICE || TTS_DEFAULT_VOICE,
@@ -82,9 +113,20 @@ export function audioMime(contentType) {
   return AUDIO_TYPES.has(mime) ? mime : null;
 }
 
-// The transcript in a chat-completions reply. Content can be a string or a
-// list of parts, depending on the API version.
+// The transcript in an ASR reply. Native replies carry output.text (or
+// sentences, or a message); OpenAI-compatible replies carry choices. Content
+// can be a string or a list of parts.
 export function parseAsrReply(reply) {
+  const out = reply?.output;
+  if (out) {
+    const sentences = [out.sentences, out.sentence].find((x) => Array.isArray(x));
+    let text = typeof out.text === 'string' ? out.text
+      : sentences ? sentences.map((x) => x?.text ?? '').join('')
+      : typeof out.sentence?.text === 'string' ? out.sentence.text
+      : out.choices?.[0]?.message?.content ?? '';
+    if (Array.isArray(text)) text = text.map((p) => (typeof p === 'string' ? p : p?.text ?? '')).join('');
+    return { text: String(text ?? '').trim(), detectedLanguage: out.language ?? null };
+  }
   const message = reply?.choices?.[0]?.message;
   let text = message?.content;
   if (Array.isArray(text)) text = text.map((p) => (typeof p === 'string' ? p : p?.text ?? '')).join('');
@@ -132,7 +174,8 @@ function mimeFromBytes(buf) {
 
 export function createVoice({ env = process.env, fetchImpl = fetch, log = console.log } = {}) {
   const s = voiceSettings(env);
-  const info = { asrModel: s.asrModel, asrBaseURL: s.asrBaseURL, ttsModel: s.ttsModel, ttsURL: s.ttsURL, ttsVoice: s.ttsVoice, ttsInstructions: s.ttsInstructionsZh };
+  const asrURL = asrEndpoint({ model: s.asrModel, baseURL: s.asrBaseURL, url: s.asrURL });
+  const info = { asrModel: s.asrModel, asrBaseURL: s.asrBaseURL, asrURL, asrProtocol: asrProtocol(s.asrModel), ttsModel: s.ttsModel, ttsURL: s.ttsURL, ttsVoice: s.ttsVoice, ttsInstructions: s.ttsInstructionsZh };
   const configured = Boolean(s.apiKey);
 
   async function call(url, init, what) {
@@ -154,29 +197,61 @@ export function createVoice({ env = process.env, fetchImpl = fetch, log = consol
     configured,
     ...info,
 
-    // audio: Buffer; mime: e.g. audio/wav; lang: the page's zh-CN / en-US.
-    async transcribe(audio, mime, lang) {
+    // audio: Buffer; mime: e.g. audio/wav; lang: the page's zh-CN / en-US;
+    // entry: the current curriculum entry (recognition context), optional.
+    async transcribe(audio, mime, lang, { entry = null } = {}) {
       const headers = requireKey('asr');
       if (!audio?.length) throw new VoiceError('asr_no_audio', 'No audio was received.', { status: 400 });
-      const problem = asrEndpointProblem(s.asrBaseURL);
+      const problem = asrEndpointProblem(asrURL);
       if (problem) throw new VoiceError('asr_failed', 'Qwen speech recognition is set up wrongly on the server.', { detail: problem });
       const language = asrLanguage(lang);
-      const body = {
-        model: s.asrModel,
-        messages: [{ role: 'user', content: [{ type: 'input_audio', input_audio: { data: `data:${mime};base64,${audio.toString('base64')}` } }] }],
-        stream: false,
-        asr_options: { language, enable_itn: false },
-      };
-      log(`[voice] -> Qwen ASR model=${s.asrModel} language=${language} audio=${mime} ${audio.length} bytes`);
-      const res = await call(`${s.asrBaseURL}/chat/completions`, { method: 'POST', headers, body: JSON.stringify(body) }, 'asr');
-      const raw = await res.text();
+      const dataUri = `data:${mime};base64,${audio.toString('base64')}`;
+      const context = s.asrContextOn ? asrContext(entry) : '';
+
+      // Request variants, fullest first. Only when Qwen rejects one as invalid
+      // (HTTP 400) is the next, plainer one tried; every attempt is logged.
+      let variants;
+      if (asrProtocol(s.asrModel) === 'openai') {
+        variants = [{
+          name: 'openai',
+          body: {
+            model: s.asrModel,
+            messages: [{ role: 'user', content: [{ type: 'input_audio', input_audio: { data: dataUri } }] }],
+            stream: false,
+            asr_options: { language, enable_itn: false },
+          },
+        }];
+      } else {
+        const wav = audioInfo(audio);
+        const format = { 'audio/wav': 'wav', 'audio/x-wav': 'wav', 'audio/wave': 'wav', 'audio/mpeg': 'mp3', 'audio/mp3': 'mp3', 'audio/mp4': 'mp4', 'audio/m4a': 'm4a', 'audio/x-m4a': 'm4a', 'audio/aac': 'aac', 'audio/webm': 'webm', 'audio/ogg': 'ogg' }[mime] ?? 'wav';
+        const audioParams = { format, ...(wav?.sampleRate ? { sample_rate: String(wav.sampleRate) } : {}) };
+        const user = { role: 'user', content: [{ type: 'input_audio', input_audio: { data: dataUri } }] };
+        variants = [
+          { name: 'context+language', body: { model: s.asrModel, input: { messages: [{ role: 'system', content: [{ text: context }] }, user] }, parameters: { ...audioParams, language_hints: [language] } } },
+          { name: 'language', body: { model: s.asrModel, input: { messages: [user] }, parameters: { ...audioParams, language_hints: [language] } } },
+          { name: 'plain', body: { model: s.asrModel, input: { messages: [user] }, parameters: audioParams } },
+        ];
+        if (!context) variants.shift();
+      }
+
+      let res;
+      let raw;
+      let used;
+      for (const v of variants) {
+        used = v.name;
+        log(`[voice] -> Qwen ASR model=${s.asrModel} request=${v.name} language=${language} audio=${mime} ${audio.length} bytes${v.name.includes('context') ? ` context="${context}"` : ''}`);
+        res = await call(asrURL, { method: 'POST', headers, body: JSON.stringify(v.body) }, 'asr');
+        raw = await res.text();
+        if (res.status !== 400 || v === variants.at(-1)) break;
+        log(`[voice]    Qwen ASR rejected request=${v.name} (400): ${raw.slice(0, 300)} - trying a plainer request`);
+      }
       if (!res.ok) throw new VoiceError('asr_failed', `Qwen speech recognition failed (status ${res.status}).`, { detail: raw.slice(0, 500), httpStatus: res.status });
       let reply;
-      try { reply = JSON.parse(raw); } catch { throw new VoiceError('asr_failed', 'Qwen speech recognition sent an unreadable reply.', { detail: raw.slice(0, 500) }); }
+      try { reply = JSON.parse(raw); } catch { throw new VoiceError('asr_failed', 'Qwen speech recognition sent an unreadable reply.', { detail: raw.slice(0, 500), httpStatus: res.status }); }
       const out = parseAsrReply(reply);
-      log(`[voice] <- Qwen ASR ${out.text ? `${out.text.length} chars` : 'empty'}${out.detectedLanguage ? ` detected=${out.detectedLanguage}` : ''}`);
-      if (!out.text) throw new VoiceError('asr_empty', 'No words were recognised in the recording.', { status: 422, httpStatus: res.status });
-      return { text: out.text, language: lang, detectedLanguage: out.detectedLanguage, model: s.asrModel, status: res.status };
+      log(`[voice] <- Qwen ASR ${res.status} ${out.text ? `${out.text.length} chars` : 'empty'}${out.detectedLanguage ? ` detected=${out.detectedLanguage}` : ''}`);
+      if (!out.text) throw new VoiceError('asr_empty', 'No words were recognised in the recording.', { status: 422, httpStatus: res.status, detail: raw.slice(0, 500) });
+      return { text: out.text, language: lang, detectedLanguage: out.detectedLanguage, model: s.asrModel, status: res.status, request: used };
     },
 
     // One spoken line → { audio: Buffer, mime, status } (status: Qwen's HTTP status).

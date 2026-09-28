@@ -4,7 +4,7 @@
 //    is checked for a format browsers play and saved to voice-check.wav so
 //    you can listen to it.
 // 2. That audio (or the WAV file you pass) goes to Qwen ASR
-//    (qwen3-asr-flash), which should hear the Mandarin back. If TTS failed
+//    (qwen-audio-3.1-asr-flash), which should hear the Mandarin back. If TTS failed
 //    and no file is given, ASR gets a short silent clip, which checks that
 //    ASR answers and accepts the key.
 // No microphone or browser needed. Never prints the API key.
@@ -12,7 +12,7 @@ import '../src/env.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createVoice, audioInfo, asrEndpointProblem } from '../src/voice.js';
+import { createVoice, audioInfo, asrEndpointProblem, asrContext } from '../src/voice.js';
 import { encodeWav } from '../public/voice-core.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -25,8 +25,9 @@ console.log(`TTS endpoint: ${voice.ttsURL}`);
 console.log(`TTS voice:    ${voice.ttsVoice}`);
 console.log(`TTS style:    ${voice.ttsInstructions}`);
 console.log(`ASR model:    ${voice.asrModel}`);
-console.log(`ASR endpoint: ${voice.asrBaseURL}/chat/completions`);
-const asrProblem = asrEndpointProblem(voice.asrBaseURL);
+console.log(`ASR endpoint: ${voice.asrURL}`);
+console.log(`ASR protocol: ${voice.asrProtocol === 'openai' ? 'OpenAI-compatible chat completions' : 'DashScope native multimodal-generation'}`);
+const asrProblem = asrEndpointProblem(voice.asrURL);
 if (asrProblem) console.error(`!!  ${asrProblem}`);
 if (!voice.configured) {
   console.error('!! DASHSCOPE_API_KEY is missing (roy-tutor/.env).');
@@ -70,15 +71,21 @@ if (file) sample = { audio: fs.readFileSync(file), mime: 'audio/wav', what: file
 else if (ttsAudio) sample = { ...ttsAudio, what: 'the TTS audio above', expect: '硬膜外' };
 else sample = { audio: Buffer.from(encodeWav(new Float32Array(16000), 16000)), mime: 'audio/wav', what: '1 s of silence (TTS failed)', expect: null, silent: true };
 console.log(`ASR input: ${sample.what}`);
+// The same context the tutor sends on Word 1 (epidural).
+const entry = { mandarin: '硬膜外', pinyin: 'yìng mó wài', english: 'epidural' };
+console.log(`ASR context: ${asrContext(entry)}`);
 try {
   const t = Date.now();
-  const r = await voice.transcribe(sample.audio, sample.mime, 'zh-CN');
+  const r = await voice.transcribe(sample.audio, sample.mime, 'zh-CN', { entry });
   console.log(`ASR HTTP status: ${r.status}`);
+  console.log(`ASR request: ${r.request}`);
+  console.log(`ASR transcript: ${r.text}`);
   const ok = !sample.expect || r.text.includes(sample.expect);
   if (!ok) failures += 1;
-  console.log(`${ok ? 'OK' : '!!'}  ASR heard: "${r.text}" in ${Date.now() - t} ms${ok ? '' : ` (expected ${sample.expect} in it)`}`);
+  console.log(`${ok ? 'OK' : '!!'}  ASR returned a transcript in ${Date.now() - t} ms${ok ? '' : ` (expected ${sample.expect} in it)`}`);
 } catch (err) {
   console.error(`ASR HTTP status: ${err.httpStatus ?? 'no reply from Qwen'}`);
+  console.error('ASR transcript: (none)');
   if (sample.silent && err.code === 'asr_empty') {
     console.log('OK  ASR answered and accepted the key (no words in silence, as expected)');
   } else {
@@ -88,5 +95,6 @@ try {
 }
 
 console.log('');
+console.log(`Summary: ASR ${voice.asrModel}, TTS ${voice.ttsModel}`);
 console.log(failures ? `${failures} check(s) failed.` : 'All voice checks passed.');
 process.exit(failures ? 1 : 0);
