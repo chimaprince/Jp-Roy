@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { openDb, getProgress, getEntryProgress, activeCourse, entryAt } from '../src/db.js';
 import { upsertCourse, importEntries } from '../src/curriculum.js';
 import { Tutor } from '../src/tutor.js';
-import { createTeacher, qwenSettings, checkDecision, DECISION_SCHEMA, INTENTS, QWEN_DEFAULT_MODEL, QWEN_DEFAULT_BASE_URL } from '../src/teacher.js';
+import { createTeacher, qwenSettings, checkDecision, normalizeDecision, DECISION_SCHEMA, INTENTS, QWEN_DEFAULT_MODEL, QWEN_DEFAULT_BASE_URL } from '../src/teacher.js';
 
 // These tests cover the tutor engine: lesson state, order, progress, and what
 // it sends to the AI teacher. The teacher is replaced by a stand-in that
@@ -332,4 +332,101 @@ test('Qwen: a reply that still misses the schema is an error, not a scripted ans
   await assert.rejects(() => teacher.decide({ event: 'student_turn' }), /did not match the lesson schema/);
   assert.deepEqual(checkDecision(decision()), []);
   assert.ok(checkDecision({ ...decision(), intent: 'dance' }).some((p) => /intent must be one of/.test(p)));
+});
+
+// ---------- invalid next_action and other form problems from Qwen ----------
+
+function qwenReturning(...replies) {
+  const calls = [];
+  const client = { chat: { completions: { create: async (params) => {
+    calls.push(params);
+    const r = replies.shift();
+    return { id: `q${calls.length}`, model: params.model, choices: [{ finish_reason: 'stop', message: { content: typeof r === 'string' ? r : JSON.stringify(r) } }] };
+  } } } };
+  const warnings = [];
+  const teacher = createTeacher({ client, log: { log() {}, warn: (m) => warnings.push(m) }, env: {} });
+  return { teacher, calls, warnings };
+}
+
+test('invalid next_action: mapped to an allowed value without a retry, and the repair is logged', async () => {
+  const { teacher, calls, warnings } = qwenReturning(decision({ correct: true, exercise_complete: true, next_action: 'Move On' }));
+  const out = await teacher.decide({ event: 'student_turn' });
+  assert.equal(out.next_action, 'next_exercise');
+  assert.equal(calls.length, 1, 'no second request needed');
+  assert.ok(warnings.some((w) => /next_action: "Move On" -> "next_exercise"/.test(w)));
+  assert.deepEqual(checkDecision(out), [], 'the repaired reply passes the schema check');
+});
+
+test('invalid next_action that cannot be mapped is derived safely and never ends, jumps or resumes', () => {
+  const base = decision();
+  for (const [bad, complete, retry, expected] of [
+    ['go_to_meaning_exercise', true, false, 'next_exercise'],
+    ['ask_differently', false, true, 'retry'],
+    ['explain_more', false, false, 'same_exercise'],
+    ['end', false, false, 'same_exercise'],
+    ['jump_to', false, false, 'same_exercise'],
+    ['return', false, false, 'same_exercise'],
+    [42, false, false, 'same_exercise'],
+    [undefined, false, false, 'same_exercise'],
+  ]) {
+    const { decision: d } = normalizeDecision({ ...base, next_action: bad, exercise_complete: complete, needs_retry: retry });
+    assert.equal(d.next_action, expected, String(bad));
+    assert.ok(!['end_session', 'jump', 'resume'].includes(d.next_action));
+  }
+  // Exact values (and plain spelling variants of them) are kept.
+  assert.equal(normalizeDecision({ ...base, next_action: 'end_session' }).decision.next_action, 'end_session');
+  assert.equal(normalizeDecision({ ...base, next_action: 'Switch To Roleplay' }).decision.next_action, 'switch_to_roleplay');
+  // An unknown intent becomes "unclear", which cannot complete an exercise.
+  assert.equal(normalizeDecision({ ...base, intent: 'completed_the_task' }).decision.intent, 'unclear');
+  assert.equal(normalizeDecision({ ...base, intent: 'end' }).decision.intent, 'unclear');
+});
+
+test('other form slips are repaired: string booleans, casing, speech as plain text, missing show/slow', () => {
+  const { decision: d, repairs } = normalizeDecision({
+    intent: 'Hint Request', understood: 'true', correct: 'null', needs_retry: 'false', exercise_complete: 'false',
+    next_action: 'Same Exercise', student_confidence: 'LOW', jump_target: '', roleplay_role: 'nurse',
+    speech: [{ lang: 'Mandarin', text: '硬膜外' }, 'Try saying it again.'], notes: null,
+  });
+  assert.deepEqual(checkDecision(d), []);
+  assert.equal(d.intent, 'hint_request');
+  assert.equal(d.understood, true);
+  assert.equal(d.correct, null);
+  assert.equal(d.exercise_complete, false);
+  assert.equal(d.student_confidence, 'struggling');
+  assert.equal(d.roleplay_role, 'Nurse');
+  assert.deepEqual(d.speech, [{ lang: 'zh', text: '硬膜外', show: null, slow: false }, { text: 'Try saying it again.', lang: 'en', show: null, slow: false }]);
+  assert.ok(repairs.length >= 8);
+});
+
+test('the prompt spells out the allowed next_action values with an example reply', async () => {
+  const { teacher, calls } = qwenReturning(decision());
+  await teacher.decide({ event: 'student_turn' });
+  const system = calls[0].messages[0].content;
+  for (const v of ['retry', 'same_exercise', 'next_exercise', 'switch_to_roleplay', 'jump', 'resume', 'end_session']) assert.match(system, new RegExp(`"${v}"`));
+  assert.match(system, /Do not invent other values/);
+  assert.match(system, /Example of a complete reply/);
+  const example = JSON.parse(system.slice(system.indexOf('{"intent"'), system.indexOf('\n', system.indexOf('{"intent"'))));
+  assert.deepEqual(checkDecision(example), [], 'the example in the prompt is itself valid');
+});
+
+test('a lesson turn with an invalid next_action does not crash and keeps the curriculum rules', async () => {
+  const db = openDb(':memory:');
+  upsertCourse(db, { id: 'vol1', title: 'JH Medics Volume 1', volume: 1, status: 'active' });
+  importEntries(db, 'vol1', FIXTURE);
+  const { teacher } = qwenReturning(
+    decision({ intent: 'other' }),
+    // "I don't know" with a made-up next_action and a premature completion:
+    decision({ intent: 'uncertain', exercise_complete: true, next_action: 'show_the_answer' }),
+    // a correct answer with a made-up next_action:
+    decision({ intent: 'answer', correct: true, exercise_complete: true, next_action: 'proceed_to_meaning' }),
+  );
+  const tutor = new Tutor({ db, teacher, now: () => new Date('2026-09-28T10:00:00') });
+  await tutor.start();
+  const unsure = await tutor.message("I don't know this word.", { source: 'text' });
+  assert.equal(unsure.exercise, 'pronounce', 'not an answer, so the exercise is not completed');
+  assert.equal(unsure.ended, undefined);
+  const right = await tutor.message('硬膜外', { source: 'voice' });
+  assert.equal(right.exercise, 'meaning', 'a real answer still advances in order');
+  assert.equal(right.listen, 'en-US');
+  assert.equal(getProgress(db, 'roy', activeCourse(db).id).current_position, 1);
 });

@@ -147,7 +147,131 @@ export function checkDecision(d) {
   return problems;
 }
 
-const JSON_INSTRUCTIONS = `\n\nOUTPUT FORMAT\nReply with one JSON object only, no other text. It must match this JSON schema exactly (every property present; use null where allowed):\n${JSON.stringify(DECISION_SCHEMA)}`;
+// ---------- making replies reliable ----------
+//
+// Small models sometimes return the right idea in the wrong form ("Next
+// Exercise", "continue", "true" as a string, speech as plain text). Before the
+// schema check, normalizeDecision() repairs the form only: it maps spelling
+// variants and synonyms onto the allowed values, and derives a safe value from
+// the rest of the reply when a field cannot be mapped. It never invents a
+// value that changes the lesson (an unknown next_action can never become
+// end_session, jump or resume; an unknown intent becomes "unclear", which cannot
+// complete an exercise; stop and jump_request are only accepted exactly). The
+// schema check still runs afterwards.
+
+const NEXT_ACTIONS = DECISION_SCHEMA.properties.next_action.enum;
+const CONFIDENCE = DECISION_SCHEMA.properties.student_confidence.enum;
+const ROLES = DECISION_SCHEMA.properties.roleplay_role.enum.filter(Boolean);
+
+const NEXT_ACTION_SYNONYMS = {
+  try_again: 'retry', repeat: 'retry', ask_again: 'retry', reattempt: 'retry', retry_exercise: 'retry',
+  stay: 'same_exercise', continue: 'same_exercise', continue_exercise: 'same_exercise', continue_lesson: 'same_exercise',
+  wait: 'same_exercise', explain: 'same_exercise', hint: 'same_exercise', clarify: 'same_exercise', answer_question: 'same_exercise', none: 'same_exercise',
+  next: 'next_exercise', advance: 'next_exercise', move_on: 'next_exercise', proceed: 'next_exercise', next_step: 'next_exercise', complete: 'next_exercise', next_entry: 'next_exercise', next_word: 'next_exercise',
+  roleplay: 'switch_to_roleplay', role_play: 'switch_to_roleplay', start_roleplay: 'switch_to_roleplay', start_role_play: 'switch_to_roleplay',
+  // Deliberately no synonyms for end_session, jump or resume: those change the
+  // session, so only the exact value counts (the engine also acts on intent).
+};
+const INTENT_SYNONYMS = {
+  attempt: 'answer', response: 'answer', reply: 'answer',
+  unsure: 'uncertain', dont_know: 'uncertain', do_not_know: 'uncertain', not_sure: 'uncertain', i_dont_know: 'uncertain',
+  hint: 'hint_request', forgot: 'hint_request', help: 'hint_request',
+  explain: 'explain_request', explanation: 'explain_request', clarification: 'explain_request',
+  pronunciation: 'pronunciation_question', repeat: 'repeat_request', again: 'practice_again', practice: 'practice_again',
+  roleplay: 'roleplay_request', role_play: 'roleplay_request', unknown: 'unclear',
+};
+
+const key = (v) => String(v ?? '').trim().toLowerCase().replace(/[\s-]+/g, '_').replace(/[^a-z_]/g, '');
+
+function toBool(v) {
+  if (typeof v === 'boolean') return v;
+  if (typeof v === 'string' && /^(true|yes)$/i.test(v.trim())) return true;
+  if (typeof v === 'string' && /^(false|no)$/i.test(v.trim())) return false;
+  return v;
+}
+
+export function normalizeDecision(raw) {
+  const repairs = [];
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { decision: raw, repairs };
+  const d = { ...raw };
+  const note = (field, from, to) => { if (from !== to) repairs.push(`${field}: ${JSON.stringify(from)} -> ${JSON.stringify(to)}`); };
+
+  for (const f of ['understood', 'needs_retry', 'exercise_complete']) {
+    const v = d[f] === undefined ? (f === 'understood') : toBool(d[f]);
+    note(f, d[f], v); d[f] = v;
+  }
+  if (d.correct === undefined || d.correct === 'null') { note('correct', d.correct, null); d.correct = null; } else { const v = toBool(d.correct); note('correct', d.correct, v); d.correct = v; }
+
+  if (!INTENTS.includes(d.intent)) {
+    const k = key(d.intent);
+    const v = INTENTS.includes(k) ? k : INTENT_SYNONYMS[k] ?? 'unclear';
+    note('intent', d.intent, v); d.intent = v;
+  }
+
+  if (!NEXT_ACTIONS.includes(d.next_action)) {
+    const k = key(d.next_action);
+    let v = NEXT_ACTIONS.includes(k) ? k : NEXT_ACTION_SYNONYMS[k];
+    // Not mappable: derive a safe value from the rest of the reply.
+    if (!v) v = d.exercise_complete === true ? 'next_exercise' : d.needs_retry === true ? 'retry' : 'same_exercise';
+    note('next_action', d.next_action, v); d.next_action = v;
+  }
+
+  if (!CONFIDENCE.includes(d.student_confidence)) {
+    const k = key(d.student_confidence);
+    const v = CONFIDENCE.includes(k) ? k : { high: 'good', confident: 'good', medium: 'ok', low: 'struggling', weak: 'struggling' }[k] ?? 'unknown';
+    note('student_confidence', d.student_confidence, v); d.student_confidence = v;
+  }
+
+  if (d.roleplay_role !== null && !ROLES.includes(d.roleplay_role)) {
+    const k = key(d.roleplay_role);
+    const v = ROLES.find((r) => key(r) === k) ?? (k === 'staff' || k === 'receptionist' ? 'Hospital staff' : null);
+    note('roleplay_role', d.roleplay_role, v); d.roleplay_role = v;
+  }
+  if (d.jump_target === undefined || d.jump_target === '') { note('jump_target', d.jump_target, null); d.jump_target = null; }
+  if (typeof d.notes !== 'string') { note('notes', d.notes, String(d.notes ?? '')); d.notes = String(d.notes ?? ''); }
+
+  if (typeof d.speech === 'string') { note('speech', 'text', 'lines'); d.speech = [{ text: d.speech }]; }
+  if (Array.isArray(d.speech)) {
+    d.speech = d.speech.map((line) => {
+      const l = typeof line === 'string' ? { text: line } : { ...line };
+      const lang = key(l.lang);
+      l.lang = ['zh', 'zh_cn', 'cn', 'chinese', 'mandarin', 'cmn'].includes(lang) ? 'zh'
+        : ['en', 'en_us', 'english'].includes(lang) ? 'en'
+        : /\p{Script=Han}/u.test(l.text ?? '') ? 'zh' : 'en';
+      if (l.show === undefined || l.show === '') l.show = null;
+      l.slow = toBool(l.slow ?? false);
+      return l;
+    });
+  }
+  return { decision: d, repairs };
+}
+
+const FIELD_GUIDE = `
+Field guide (use exactly these values; any other value is an error):
+- intent: one of ${INTENTS.join(', ')}. Use "answer" only for an attempt at the current exercise.
+- understood: true or false.
+- correct: true or false when intent is "answer"; otherwise null.
+- needs_retry: true when you are asking Roy to try the same exercise again.
+- exercise_complete: true only when Roy has now shown what the current exercise asks for.
+- next_action: exactly one of
+    "retry"              Roy should try the same exercise again,
+    "same_exercise"      stay on the current exercise (explaining, hinting, answering a question),
+    "next_exercise"      the current exercise is complete; you have started the next step from if_complete,
+    "switch_to_roleplay" Roy asked for role-play and you have started the scene,
+    "jump"               Roy asked to go to another entry (set jump_target),
+    "resume"             Roy wants to leave a side trip and go back to the curriculum,
+    "end_session"        Roy wants to stop for today.
+  Do not invent other values such as "continue", "move_on" or "next_word".
+- student_confidence: one of ${CONFIDENCE.join(', ')}.
+- jump_target: the word or number Roy asked for when intent is "jump_request"; otherwise null.
+- roleplay_role: one of ${ROLES.map((r) => `"${r}"`).join(', ')} when Roy chose his role this turn; otherwise null.
+- speech: a list of lines {"lang": "en" or "zh", "text": "...", "show": null or "on-screen text", "slow": true or false}.
+- notes: one short sentence for the app log.
+
+Example of a complete reply (content is only an example):
+{"intent":"uncertain","understood":true,"correct":null,"needs_retry":false,"exercise_complete":false,"next_action":"same_exercise","student_confidence":"struggling","jump_target":null,"roleplay_role":null,"speech":[{"lang":"en","text":"No problem, let's take it slowly. Listen:","show":null,"slow":false},{"lang":"zh","text":"硬膜外","show":"硬膜外 — yìng mó wài","slow":true},{"lang":"en","text":"Now you try saying it.","show":null,"slow":false}],"notes":"Roy is unsure; modelled the word again."}`;
+
+const JSON_INSTRUCTIONS = `\n\nOUTPUT FORMAT\nReply with one JSON object only, no other text, with every property present.\n${FIELD_GUIDE}\n\nJSON schema:\n${JSON.stringify(DECISION_SCHEMA)}`;
 
 export function createTeacher({ client, log = console, env = process.env } = {}) {
   // Read when the teacher is created, after .env has been loaded.
@@ -184,15 +308,21 @@ export function createTeacher({ client, log = console, env = process.env } = {})
         { role: 'system', content: system },
         { role: 'user', content: JSON.stringify(context, null, 1) },
       ];
+      // Parse, repair the form (see normalizeDecision), then validate.
+      const read = (text) => {
+        let parsed;
+        try { parsed = JSON.parse(text); } catch { return { problems: ['reply is not valid JSON'] }; }
+        const { decision, repairs } = normalizeDecision(parsed);
+        if (repairs.length) log.warn(`[teacher]    repaired reply fields: ${repairs.join('; ')}`);
+        return { decision, problems: checkDecision(decision) };
+      };
       let text = await call(messages);
-      let decision;
-      let problems;
-      try { decision = JSON.parse(text); problems = checkDecision(decision); } catch { problems = ['reply is not valid JSON']; }
+      let { decision, problems } = read(text);
       if (problems.length) {
         // One corrected retry, then give up loudly (no scripted fallback).
         log.warn(`[teacher]    reply did not match the schema (${problems.slice(0, 3).join('; ')}); asking once more`);
-        text = await call([...messages, { role: 'assistant', content: text }, { role: 'user', content: `That reply did not match the required JSON schema: ${problems.join('; ')}. Send the corrected JSON object only.` }]);
-        try { decision = JSON.parse(text); problems = checkDecision(decision); } catch { problems = ['reply is not valid JSON']; }
+        text = await call([...messages, { role: 'assistant', content: text }, { role: 'user', content: `That reply did not match the required JSON schema: ${problems.join('; ')}. Use only the allowed values from the field guide. Send the corrected JSON object only.` }]);
+        ({ decision, problems } = read(text));
         if (problems.length) throw new Error(`The AI teacher's reply did not match the lesson schema: ${problems.join('; ')}`);
       }
       log.log(`[teacher]    intent=${decision.intent} correct=${decision.correct} exercise_complete=${decision.exercise_complete} next=${decision.next_action}`);
