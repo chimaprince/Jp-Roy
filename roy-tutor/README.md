@@ -34,7 +34,7 @@ Open the page in any current browser (Chrome, Edge, Safari, iPhone Safari). Pres
 | `QWEN_BASE_URL` | Default `https://ws-c2mgxehx4ud1bn7.cn-beijing.maas.aliyuncs.com/compatible-mode/v1`. |
 | `QWEN_ENABLE_THINKING` | Default `false` (faster replies for voice). |
 | `QWEN_ASR_MODEL` | Speech recognition model. Default `qwen3-asr-flash`. |
-| `QWEN_ASR_BASE_URL` | Default `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` (Singapore). |
+| `QWEN_ASR_BASE_URL` | Your Singapore workspace endpoint: `https://<WORKSPACE_ID>.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1` (workspace ID from Model Studio). If unset: `https://dashscope-intl.aliyuncs.com/compatible-mode/v1`. |
 | `QWEN_TTS_MODEL` | Teacher voice model. Default `qwen3-tts-instruct-flash`. |
 | `QWEN_TTS_URL` | Default `https://dashscope-intl.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation` (Singapore). |
 | `QWEN_TTS_VOICE` | Default `Cherry` (speaks Mandarin and English). |

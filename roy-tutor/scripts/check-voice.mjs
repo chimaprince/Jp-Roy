@@ -12,7 +12,7 @@ import '../src/env.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createVoice, audioInfo } from '../src/voice.js';
+import { createVoice, audioInfo, asrEndpointProblem } from '../src/voice.js';
 import { encodeWav } from '../public/voice-core.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -26,6 +26,8 @@ console.log(`TTS voice:    ${voice.ttsVoice}`);
 console.log(`TTS style:    ${voice.ttsInstructions}`);
 console.log(`ASR model:    ${voice.asrModel}`);
 console.log(`ASR endpoint: ${voice.asrBaseURL}/chat/completions`);
+const asrProblem = asrEndpointProblem(voice.asrBaseURL);
+if (asrProblem) console.error(`!!  ${asrProblem}`);
 if (!voice.configured) {
   console.error('!! DASHSCOPE_API_KEY is missing (roy-tutor/.env).');
   process.exit(1);
@@ -71,10 +73,12 @@ console.log(`ASR input: ${sample.what}`);
 try {
   const t = Date.now();
   const r = await voice.transcribe(sample.audio, sample.mime, 'zh-CN');
+  console.log(`ASR HTTP status: ${r.status}`);
   const ok = !sample.expect || r.text.includes(sample.expect);
   if (!ok) failures += 1;
   console.log(`${ok ? 'OK' : '!!'}  ASR heard: "${r.text}" in ${Date.now() - t} ms${ok ? '' : ` (expected ${sample.expect} in it)`}`);
 } catch (err) {
+  console.error(`ASR HTTP status: ${err.httpStatus ?? 'no reply from Qwen'}`);
   if (sample.silent && err.code === 'asr_empty') {
     console.log('OK  ASR answered and accepted the key (no words in silence, as expected)');
   } else {

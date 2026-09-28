@@ -10,7 +10,7 @@ import { loadConfiguredCourses } from './src/curriculum.js';
 import { createTeacher } from './src/teacher.js';
 import { Tutor } from './src/tutor.js';
 import { serverUrls } from './src/network.js';
-import { createVoice, SpeechStore, VoiceError, audioMime, MAX_AUDIO_BYTES } from './src/voice.js';
+import { createVoice, SpeechStore, VoiceError, audioMime, MAX_AUDIO_BYTES, asrEndpointProblem } from './src/voice.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(here, 'public');
@@ -48,6 +48,7 @@ if (teacher.configured) {
 const voice = createVoice();
 const speech = new SpeechStore(voice);
 console.log(`speech recognition: Qwen ${voice.asrModel} at ${voice.asrBaseURL}`);
+if (asrEndpointProblem(voice.asrBaseURL)) console.error(`  ${asrEndpointProblem(voice.asrBaseURL)}`);
 console.log(`teacher voice: Qwen ${voice.ttsModel} (voice ${voice.ttsVoice}) at ${voice.ttsURL}`);
 const tutor = new Tutor({ db, teacher, userId: process.env.TUTOR_USER_ID || 'roy', userName: process.env.TUTOR_USER_NAME || 'Roy' });
 

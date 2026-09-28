@@ -12,7 +12,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   createVoice, voiceSettings, SpeechStore, parseAsrReply, parseTtsReply, asrLanguage, ttsLanguage, audioMime,
-  ASR_DEFAULT_MODEL, ASR_DEFAULT_BASE_URL, TTS_DEFAULT_MODEL, TTS_DEFAULT_URL, TTS_DEFAULT_INSTRUCTIONS_ZH, TTS_DEFAULT_INSTRUCTIONS_EN, audioInfo,
+  ASR_DEFAULT_MODEL, ASR_DEFAULT_BASE_URL, TTS_DEFAULT_MODEL, TTS_DEFAULT_URL, TTS_DEFAULT_INSTRUCTIONS_ZH, TTS_DEFAULT_INSTRUCTIONS_EN, audioInfo, asrEndpointProblem,
 } from '../src/voice.js';
 import {
   encodeWav, resample, toMono, SilenceDetector, rms, pickRecorderType, uploadType, playbackRate, STATES, BUSY_STATES, silentWav,
@@ -135,7 +135,7 @@ test('ASR request: the recording as input_audio, the lesson language as the hint
   const { fn, calls } = fakeFetch(() => ({ json: { choices: [{ message: { content: '硬膜外', annotations: [{ type: 'audio_info', language: 'zh' }] } }] } }));
   const voice = createVoice({ env: { DASHSCOPE_API_KEY: KEY }, fetchImpl: fn, log: quiet });
   const out = await voice.transcribe(WAV, 'audio/wav', 'zh-CN');
-  assert.deepEqual(out, { text: '硬膜外', language: 'zh-CN', detectedLanguage: 'zh', model: 'qwen3-asr-flash' });
+  assert.deepEqual(out, { text: '硬膜外', language: 'zh-CN', detectedLanguage: 'zh', model: 'qwen3-asr-flash', status: 200 });
   const c = calls[0];
   assert.equal(c.url, 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions');
   assert.equal(c.headers.Authorization, `Bearer ${KEY}`);
@@ -149,6 +149,31 @@ test('ASR request: the recording as input_audio, the lesson language as the hint
   await voice.transcribe(WAV, 'audio/mp4', 'en-US');
   assert.equal(calls[1].body.asr_options.language, 'en', 'English exercises are recognised as English');
   assert.match(calls[1].body.messages[0].content[0].input_audio.data, /^data:audio\/mp4;base64,/);
+});
+
+test('ASR uses the Singapore workspace endpoint from QWEN_ASR_BASE_URL and reports the HTTP status', async () => {
+  const ws = 'https://ws-test123.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1';
+  const { fn, calls } = fakeFetch(() => ({ json: { choices: [{ message: { content: '硬膜外' } }] } }));
+  const voice = createVoice({ env: { DASHSCOPE_API_KEY: KEY, QWEN_ASR_MODEL: 'qwen3-asr-flash', QWEN_ASR_BASE_URL: ws + '/' }, fetchImpl: fn, log: quiet });
+  const out = await voice.transcribe(WAV, 'audio/wav', 'zh-CN');
+  assert.equal(calls[0].url, `${ws}/chat/completions`);
+  assert.equal(calls[0].body.model, 'qwen3-asr-flash');
+  assert.equal(out.status, 200);
+  assert.equal(asrEndpointProblem(ws), null);
+  assert.equal(voice.ttsModel, 'qwen3-tts-instruct-flash', 'TTS is not affected');
+
+  const denied = createVoice({ env: { DASHSCOPE_API_KEY: KEY, QWEN_ASR_BASE_URL: ws }, fetchImpl: fakeFetch(() => ({ status: 403, json: { code: 'AccessDenied' } })).fn, log: quiet });
+  await assert.rejects(denied.transcribe(WAV, 'audio/wav', 'zh-CN'), (e) => e.code === 'asr_failed' && e.httpStatus === 403);
+});
+
+test('an unfilled workspace placeholder is caught before any request', async () => {
+  const placeholder = 'https://<WORKSPACE_ID>.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1';
+  assert.match(asrEndpointProblem(placeholder), /placeholder/);
+  assert.match(asrEndpointProblem('not a url'), /not a valid URL/);
+  const { fn, calls } = fakeFetch(() => ({ json: {} }));
+  const voice = createVoice({ env: { DASHSCOPE_API_KEY: KEY, QWEN_ASR_BASE_URL: placeholder }, fetchImpl: fn, log: quiet });
+  await assert.rejects(voice.transcribe(WAV, 'audio/wav', 'zh-CN'), (e) => e.code === 'asr_failed' && /placeholder/.test(e.detail));
+  assert.equal(calls.length, 0);
 });
 
 test('ASR reply parsing: string or parts; empty is an error, not a blank answer', async () => {

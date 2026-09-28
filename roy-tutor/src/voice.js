@@ -12,6 +12,21 @@
 
 export const ASR_DEFAULT_MODEL = 'qwen3-asr-flash';
 export const ASR_DEFAULT_BASE_URL = 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1';
+// Singapore workspace-specific host (Model Studio workspace, International):
+// set QWEN_ASR_BASE_URL to this with your workspace ID filled in.
+export const ASR_WORKSPACE_URL_FORMAT = 'https://<WORKSPACE_ID>.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1';
+
+// A problem with the ASR endpoint setting that would fail every request, or null.
+export function asrEndpointProblem(url) {
+  if (/[<>]|WORKSPACE_ID/i.test(url)) return `QWEN_ASR_BASE_URL still contains the placeholder: put your workspace ID in (${ASR_WORKSPACE_URL_FORMAT}).`;
+  try {
+    const u = new URL(url);
+    if (!/^https?:$/.test(u.protocol)) return `QWEN_ASR_BASE_URL must start with https:// (got ${u.protocol}).`;
+  } catch {
+    return `QWEN_ASR_BASE_URL is not a valid URL: ${url}`;
+  }
+  return null;
+}
 export const TTS_DEFAULT_MODEL = 'qwen3-tts-instruct-flash';
 export const TTS_DEFAULT_URL = 'https://dashscope-intl.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation';
 export const TTS_DEFAULT_VOICE = 'Cherry';
@@ -143,6 +158,8 @@ export function createVoice({ env = process.env, fetchImpl = fetch, log = consol
     async transcribe(audio, mime, lang) {
       const headers = requireKey('asr');
       if (!audio?.length) throw new VoiceError('asr_no_audio', 'No audio was received.', { status: 400 });
+      const problem = asrEndpointProblem(s.asrBaseURL);
+      if (problem) throw new VoiceError('asr_failed', 'Qwen speech recognition is set up wrongly on the server.', { detail: problem });
       const language = asrLanguage(lang);
       const body = {
         model: s.asrModel,
@@ -153,13 +170,13 @@ export function createVoice({ env = process.env, fetchImpl = fetch, log = consol
       log(`[voice] -> Qwen ASR model=${s.asrModel} language=${language} audio=${mime} ${audio.length} bytes`);
       const res = await call(`${s.asrBaseURL}/chat/completions`, { method: 'POST', headers, body: JSON.stringify(body) }, 'asr');
       const raw = await res.text();
-      if (!res.ok) throw new VoiceError('asr_failed', `Qwen speech recognition failed (status ${res.status}).`, { detail: raw.slice(0, 500) });
+      if (!res.ok) throw new VoiceError('asr_failed', `Qwen speech recognition failed (status ${res.status}).`, { detail: raw.slice(0, 500), httpStatus: res.status });
       let reply;
       try { reply = JSON.parse(raw); } catch { throw new VoiceError('asr_failed', 'Qwen speech recognition sent an unreadable reply.', { detail: raw.slice(0, 500) }); }
       const out = parseAsrReply(reply);
       log(`[voice] <- Qwen ASR ${out.text ? `${out.text.length} chars` : 'empty'}${out.detectedLanguage ? ` detected=${out.detectedLanguage}` : ''}`);
-      if (!out.text) throw new VoiceError('asr_empty', 'No words were recognised in the recording.', { status: 422 });
-      return { text: out.text, language: lang, detectedLanguage: out.detectedLanguage, model: s.asrModel };
+      if (!out.text) throw new VoiceError('asr_empty', 'No words were recognised in the recording.', { status: 422, httpStatus: res.status });
+      return { text: out.text, language: lang, detectedLanguage: out.detectedLanguage, model: s.asrModel, status: res.status };
     },
 
     // One spoken line → { audio: Buffer, mime, status } (status: Qwen's HTTP status).
