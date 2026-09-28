@@ -76,6 +76,16 @@ sentences, role-play and review; English for explaining the meaning. The
 status line shows the language in use while listening. Chrome gets
 `cmn-Hans-CN`; other browsers get `zh-CN`.
 
+Chrome recognises one language at a time. When the lesson expects Mandarin
+but Roy wants to say something in English ("I don't know", "can you explain
+that again?"), or the reverse, he taps the **Mic: … · switch to …** button
+under the status line. The switch lasts for that one answer; the next teacher
+reply sets the language from the lesson again.
+
+The teacher's replies are read by the browser's speech voices. Each line is
+split by script, so Chinese characters are read by a Chinese voice and the rest
+by an English voice. This is playback only, not pronunciation scoring.
+
 **Word recognition vs pronunciation.** The browser's speech recogniser gives
 text, not audio. The server reports to the teacher whether the recogniser wrote
 down the expected characters (`src/recognition.js`). That is word recognition,

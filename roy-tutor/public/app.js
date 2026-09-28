@@ -6,26 +6,34 @@
 // the recogniser's other guesses and its confidence go to the server, where
 // the tutor evaluates them. No API keys live here.
 
+import { recognitionLang as toRecognitionLang, isChromeBrowser, LANGUAGE_LABEL, otherLanguage, lessonStateText, speechParts, friendlyError, RECOGNITION_ERRORS } from './voice-core.js';
+
 const $ = (id) => document.getElementById(id);
 const talkBtn = $('talk');
 const micStateEl = $('mic-state');
 const statusEl = $('status');
 const heardEl = $('heard');
 const logEl = $('log');
+const lessonEl = $('lesson-state');
+const micLangBtn = $('mic-lang');
+const IS_CHROME = isChromeBrowser(navigator);
+const CAN_SPEAK = 'speechSynthesis' in window && typeof SpeechSynthesisUtterance !== 'undefined';
 
 const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 
 const STATES = {
   idle: { badge: 'IDLE', button: '🎙 START TALKING' },
-  speaking: { badge: 'TEACHER RESPONSE', button: '🔊 TUTOR SPEAKING' },
+  speaking: { badge: 'TEACHER SPEAKING', button: '🔊 TEACHER SPEAKING' },
   listening: { badge: 'LISTENING', button: '🎙 LISTENING…' },
-  processing: { badge: 'PROCESSING', button: '⏳ PROCESSING…' },
+  processing: { badge: 'THINKING', button: '⏳ THINKING…' },
 };
 
 let state = 'idle';
 let sessionOpen = false; // the tutor has asked something and is waiting for an answer
-let listenLang = null;
+let listenLang = null; // the language the lesson expects next (from the server)
+let langOverride = null; // Roy switched the microphone language for this turn
 let mode = null;
+let ttsWarned = false;
 let recognizer = null;
 let turnsHeard = 0;
 let silentRetries = 0;
@@ -38,11 +46,16 @@ function accessHeaders() {
 }
 
 async function api(method, url, body) {
-  const res = await fetch(url, {
+  let res;
+  try {
+    res = await fetch(url, {
     method,
-    headers: { 'Content-Type': 'application/json', ...accessHeaders() },
-    body: body ? JSON.stringify(body) : undefined,
-  });
+      headers: { 'Content-Type': 'application/json', ...accessHeaders() },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  } catch (err) {
+    throw Object.assign(new TypeError(err.message || 'Failed to fetch'), { code: 'network' });
+  }
   if (res.status === 401) {
     const code = prompt('Access code');
     if (code) {
@@ -50,7 +63,10 @@ async function api(method, url, body) {
       return api(method, url, body);
     }
   }
-  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
+  if (!res.ok) {
+    const info = await res.json().catch(() => ({}));
+    throw Object.assign(new Error(info.error || res.statusText), { code: info.code ?? (res.status >= 500 ? 'server_error' : null), status: res.status });
+  }
   return res.json();
 }
 
@@ -74,21 +90,31 @@ function showHeard(text, final = false) {
   heardEl.textContent = text ? `${final ? 'You said' : 'Hearing'}: “${text}”` : '';
 }
 
-const LANGUAGE_LABEL = { 'zh-CN': 'Mandarin', 'en-US': 'English' };
+// The language the microphone uses for the next answer: the lesson's choice,
+// unless Roy switched it for this turn.
+function micLang() {
+  return langOverride ?? listenLang;
+}
+
+function recognitionLang(lang) {
+  return toRecognitionLang(lang, { isChrome: IS_CHROME });
+}
 
 function listeningHint() {
-  const heardAs = `Listening in ${LANGUAGE_LABEL[listenLang] ?? listenLang} (${recognitionLang(listenLang)}).`;
+  const lang = micLang();
+  const heardAs = `Listening in ${LANGUAGE_LABEL[lang] ?? lang} (${recognitionLang(lang)}).`;
+  if (langOverride) return `${heardAs} Switched for this answer only.`;
   if (mode === 'pronunciation') return `${heardAs} Say the Mandarin term.`;
-  if (listenLang?.startsWith('zh')) return `${heardAs} Answer in Mandarin.`;
+  if (lang?.startsWith('zh')) return `${heardAs} Answer in Mandarin.`;
   return `${heardAs} Answer in English, in your own words.`;
 }
 
-// The server says which language the answer should be in. Chrome's recogniser
-// lists Mandarin as cmn-Hans-CN; other browsers take zh-CN.
-function recognitionLang(lang) {
-  const isChrome = navigator.userAgentData?.brands?.some((b) => b.brand === 'Google Chrome')
-    || (/Chrome\//.test(navigator.userAgent) && !/Edg\//.test(navigator.userAgent));
-  return lang === 'zh-CN' && isChrome ? 'cmn-Hans-CN' : lang;
+function renderMicLang() {
+  const lang = micLang();
+  micLangBtn.hidden = !sessionOpen || !lang;
+  if (!lang) return;
+  micLangBtn.textContent = `Mic: ${LANGUAGE_LABEL[lang]} · switch to ${LANGUAGE_LABEL[otherLanguage(lang)]}`;
+  micLangBtn.setAttribute('aria-pressed', String(Boolean(langOverride)));
 }
 
 function addLog(who, text) {
@@ -108,6 +134,7 @@ function renderStatus(status) {
 }
 
 function renderView(view) {
+  lessonEl.textContent = lessonStateText(view);
   for (const li of document.querySelectorAll('#stages li')) {
     li.classList.toggle('active', li.dataset.stage === view.stage);
   }
@@ -135,7 +162,7 @@ function pickVoice(lang) {
 
 function speakSegment(seg) {
   return new Promise((resolve) => {
-    if (!('speechSynthesis' in window)) return resolve();
+    if (!CAN_SPEAK) return resolve();
     const u = new SpeechSynthesisUtterance(seg.text);
     u.lang = seg.lang === 'zh' ? 'zh-CN' : 'en-US';
     const voice = pickVoice(seg.lang);
@@ -143,19 +170,32 @@ function speakSegment(seg) {
     u.rate = seg.rate ?? (seg.lang === 'zh' ? 0.85 : 1);
     // Some browsers never fire onend; don't let that stall the conversation.
     const timer = setTimeout(resolve, 2500 + seg.text.length * 180 / u.rate);
-    u.onend = u.onerror = () => { clearTimeout(timer); resolve(); };
+    u.onend = () => { clearTimeout(timer); resolve(); };
+    u.onerror = (e) => {
+      clearTimeout(timer);
+      if (!ttsWarned && e.error && e.error !== 'interrupted' && e.error !== 'canceled') {
+        ttsWarned = true;
+        addLog('note', `The browser could not play the teacher's voice (${e.error}). Read the replies here.`);
+      }
+      resolve();
+    };
     speechSynthesis.speak(u);
   });
 }
 
 async function speakAll(segments) {
   addLog('tutor', segments.map((seg) => seg.show ?? seg.text).join(' '));
+  if (!CAN_SPEAK) {
+    if (!ttsWarned) { ttsWarned = true; addLog('note', "This browser can't speak the teacher's replies. Read them here."); }
+    return true;
+  }
   const run = ++speechRun;
   setState('speaking');
   setStatus('Tap the button to skip ahead and answer.');
-  for (const seg of segments) {
+  // Each line is split by script: Chinese characters in a Chinese voice, the rest in English.
+  for (const part of segments.flatMap(speechParts)) {
     if (run !== speechRun) return false;
-    await speakSegment(seg);
+    await speakSegment(part);
   }
   return run === speechRun;
 }
@@ -174,14 +214,15 @@ function openTypeFallback(message) {
 }
 
 function listen() {
-  if (!sessionOpen || !listenLang) { setState('idle'); setStatus('Tap START TALKING to continue.'); return; }
+  if (!sessionOpen || !micLang()) { setState('idle'); setStatus('Tap START TALKING to continue.'); return; }
   if (!Recognition) {
     openTypeFallback('This browser has no speech recognition. Type your answer below, or use Chrome or Edge.');
     return;
   }
   const again = turnsHeard > 0;
   recognizer = new Recognition();
-  recognizer.lang = recognitionLang(listenLang);
+  const usedLang = micLang();
+  recognizer.lang = recognitionLang(usedLang);
   recognizer.continuous = false;
   recognizer.interimResults = true;
   recognizer.maxAlternatives = 5;
@@ -205,16 +246,9 @@ function listen() {
     showHeard((finalText + interim).trim());
   };
   recognizer.onerror = (e) => {
+    if (e.error === 'no-speech' || e.error === 'aborted') return; // handled in onend
     failed = true;
-    if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
-      openTypeFallback('Microphone access is blocked. Allow the microphone for this site and tap START TALKING, or type below.');
-    } else if (e.error === 'audio-capture') {
-      openTypeFallback('No microphone was found. Connect one and tap START TALKING, or type below.');
-    } else if (e.error === 'network') {
-      openTypeFallback("The browser's speech service can't be reached. Type your answer below for now.");
-    } else if (e.error === 'no-speech') {
-      failed = false; // handled in onend as a silent turn
-    }
+    openTypeFallback(RECOGNITION_ERRORS[e.error] ?? `Speech recognition stopped (${e.error}). Tap START TALKING to try again, or type below.`);
   };
   recognizer.onend = () => {
     recognizer = null;
@@ -224,7 +258,7 @@ function listen() {
       silentRetries = 0;
       turnsHeard += 1;
       showHeard(text, true);
-      send(text, { source: 'voice', alternatives, confidence, language: listenLang });
+      send(text, { source: 'voice', alternatives, confidence, language: usedLang });
       return;
     }
     silentRetries += 1;
@@ -259,8 +293,10 @@ async function handle(result) {
   if (result.status) renderStatus(result.status);
   renderView(result);
   listenLang = result.listen;
+  langOverride = null;
   mode = result.mode;
   sessionOpen = !result.ended;
+  renderMicLang();
   const finished = await speakAll(result.say || []);
   if (result.ended) {
     setState('idle');
@@ -283,7 +319,8 @@ async function send(text, meta = { source: 'text' }) {
     await handle(result);
   } catch (err) {
     setState('idle');
-    setStatus(`Problem: ${err.message}. Tap START TALKING to try again.`);
+    setStatus(`${friendlyError(err)} That answer was not counted; tap START TALKING and say it again.`);
+    renderMicLang();
   }
 }
 
@@ -294,7 +331,7 @@ async function startSession() {
     await handle(await api('POST', '/api/session/start'));
   } catch (err) {
     setState('idle');
-    setStatus(`Problem: ${err.message}`);
+    setStatus(friendlyError(err));
   }
 }
 
@@ -313,6 +350,16 @@ talkBtn.addEventListener('click', () => {
   else startSession();
 });
 
+// Chrome listens in one language at a time. When the lesson expects Mandarin
+// but Roy wants to say something in English (or the reverse), he switches the
+// microphone for this one answer; the next teacher reply resets it.
+micLangBtn.addEventListener('click', () => {
+  langOverride = langOverride ? null : otherLanguage(listenLang);
+  renderMicLang();
+  if (state === 'listening') { stopListening(); listen(); }
+  else setStatus(listeningHint());
+});
+
 for (const btn of document.querySelectorAll('.quick button')) {
   btn.addEventListener('click', () => {
     if (!sessionOpen) { startSession(); return; }
@@ -329,12 +376,14 @@ $('type-form').addEventListener('submit', (e) => {
   send(text, { source: 'text' });
 });
 
-if ('speechSynthesis' in window) speechSynthesis.getVoices();
+if (CAN_SPEAK) speechSynthesis.getVoices();
 setState('idle');
+renderMicLang();
+if (!Recognition) setStatus('This browser has no speech recognition: use Chrome or Edge for voice, or type below.');
 api('GET', '/api/status').then((s) => {
   renderStatus(s);
   if (s.session) renderView(s.session);
   if (s.aiConfigured === false) {
     setStatus('Qwen is not configured: DASHSCOPE_API_KEY is missing. Set it in roy-tutor/.env on the server and restart the server.');
   }
-}).catch(() => {});
+}).catch((err) => setStatus(friendlyError(err)));

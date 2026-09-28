@@ -65,6 +65,14 @@ h1 { margin: 0; font-size: 1.5rem; letter-spacing: 0.06em; }
 .status.listening { color: var(--accent); font-weight: 600; }
 .heard { text-align: center; margin: 0 0 12px; font-size: 1.1rem; overflow-wrap: anywhere; }
 .talk[data-state="processing"] { opacity: 0.75; cursor: progress; }
+.lesson { margin: 4px 0 0; color: var(--muted); }
+.mic-lang {
+  display: block; margin: 0 auto 12px; padding: 6px 12px; border-radius: 999px;
+  border: 1px solid var(--line); background: var(--surface); color: var(--text);
+  font: inherit; font-size: 0.85rem; cursor: pointer;
+}
+.mic-lang[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.log .note { color: var(--muted); font-size: 0.9rem; align-self: center; }
 
 .card { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; padding: 20px; text-align: center; }
 .card p { margin: 4px 0; }
