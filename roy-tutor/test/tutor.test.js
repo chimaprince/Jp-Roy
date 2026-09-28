@@ -98,7 +98,7 @@ test('session start sends the teacher the entry and lesson state; mic language i
   assert.equal(r.status.total, 3);
 });
 
-test('Roy\'s turn: transcript, recogniser details and word recognition go to the teacher; no pronunciation score is claimed', async () => {
+test('Roy\'s turn: transcript, recogniser details and the ASR evaluation go to the teacher; no pronunciation score is claimed', async () => {
   const { tutor, teacher } = setup();
   await tutor.start();
   await tutor.message('应膜外', { source: 'voice', alternatives: ['英模外'], confidence: 0.7, language: 'zh-CN' });
@@ -107,19 +107,22 @@ test('Roy\'s turn: transcript, recogniser details and word recognition go to the
   assert.match(said.input, /voice/);
   assert.equal(said.recogniser_language, 'zh-CN');
   assert.deepEqual(said.recogniser_alternatives, ['英模外']);
-  assert.match(said.word_recognition.result, /some of the expected characters/);
-  assert.deepEqual(said.word_recognition.characters_not_recognised.map((c) => c.char), ['硬']);
-  assert.match(said.word_recognition.what_this_is, /Not a pronunciation or tone score/);
+  const ev = said.asr_evaluation;
+  assert.equal(ev.level, 'likely_correct_asr_character_mismatch', '应 is also yìng');
+  assert.equal(ev.expected, '硬膜外');
+  assert.deepEqual(ev.characters.map((c) => c.comparison), ['same_sound', 'same_character', 'same_character']);
+  assert.match(ev.what_this_is, /not ground truth/);
+  assert.match(ev.what_this_is, /not a tone score/);
   assert.equal(said.pronunciation_assessment, null);
 });
 
-test('typed input is marked as a text fallback with no word-recognition report', async () => {
+test('typed input is marked as a text fallback with no ASR evaluation', async () => {
   const { tutor, teacher } = setup();
   await tutor.start();
   await tutor.message('硬膜外', { source: 'text' });
   const said = last(teacher).roy_said;
   assert.match(said.input, /typed/);
-  assert.equal(said.word_recognition, null);
+  assert.equal(said.asr_evaluation, null, 'typed characters are what he typed, not a recogniser guess');
 });
 
 test('a completed exercise advances; the meaning exercise switches the mic to English', async () => {

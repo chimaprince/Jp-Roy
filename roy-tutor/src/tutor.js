@@ -1,6 +1,7 @@
 import * as store from './db.js';
 import { findEntry } from './intents.js';
-import { checkWordRecognition, syllablesWithTones } from './recognition.js';
+import { syllablesWithTones } from './recognition.js';
+import { evaluateSpokenTerm } from './evaluation.js';
 import { TeacherNotConfigured } from './teacher.js';
 
 // The tutor engine. It owns the lesson state and the rules that must hold no
@@ -27,6 +28,23 @@ const LISTEN = { pronounce: 'zh-CN', meaning: 'en-US', sentence: 'zh-CN', rolepl
 const LANGUAGE_NAME = { 'zh-CN': 'Mandarin (zh-CN)', 'en-US': 'English (en-US)' };
 // How the answer is checked, for the page's hint line.
 const MODE = { pronounce: 'pronunciation', review: 'pronunciation', meaning: 'answer', sentence: 'answer', roleplay: 'answer' };
+
+// Exercises where Roy's answer should BE the term; there the engine enforces
+// the ASR evaluation (see #guard). In sentence and role-play the evaluation only
+// says whether the term appears.
+const TERM_ANSWER = new Set(['pronounce', 'review']);
+
+// A reply that counts the answer as right. (A review item may be completed
+// with correct false: the answer was revealed and the word is marked missed.)
+const claimsCorrect = (d) => d.correct === true || (d.exercise_complete && d.correct !== false);
+
+// What the teacher should do at each evaluation level.
+const HOW_TO_RESPOND = {
+  high_confidence_correct: 'The recogniser wrote the term exactly. Treat the answer as correct. You still cannot judge his tones.',
+  likely_correct_asr_character_mismatch: "Treat this as correct pronunciation evidence. Do NOT say he mispronounced anything. Say you heard the word, then separate the two things: what the recogniser transcribed (the other character) and the character in our medical term. Example: \"Good, I heard the word. The recogniser wrote 磨, but the character in our medical term is 膜. Let's say the complete word once more.\" Never count this as a wrong answer.",
+  uncertain: 'The evidence is unclear (a tone, a commonly confused sound, or one syllable differs). Do not say he was wrong and do not mark it correct yet. Say you did not quite catch it, model the term slowly, and ask him to say it again. Talk about what the recogniser transcribed, not about his pronunciation. If he has already repeated it (see wrong_attempts_this_exercise and the conversation), you may accept it and move on while modelling the term once more.',
+  clearly_incorrect: 'The expected sounds were not recognised. Do not mark it correct. Tell him what the recogniser transcribed (as the recogniser\'s transcript, not as a verdict on his tones), model the term slowly, and ask him to try again. If he asked a question or said something else instead of answering, respond to that.',
+};
 
 function localDate(date) {
   return date.toLocaleDateString('en-CA', { timeZone: process.env.TUTOR_TIMEZONE || undefined });
@@ -183,7 +201,15 @@ export class Tutor {
     s.transcript ??= [];
     if (event.heard) s.transcript.push({ who: 'roy', text: event.heard.text, input: event.heard.source });
 
-    let decision = await this.teacher.decide(this.#context(course, session, event));
+    const ctx = this.#context(course, session, event);
+    let decision = await this.teacher.decide(ctx);
+    const conflict = this.#guardConflict(session, ctx, decision);
+    if (conflict) {
+      // The reply contradicts the ASR evidence: ask once more, with the reason.
+      console.warn(`[tutor] teacher reply conflicts with the ASR evaluation (${conflict.level}); asking again`);
+      decision = await this.teacher.decide({ ...ctx, engine_check: conflict.message });
+    }
+    this.#enforceEvidence(session, ctx, decision);
     const followUp = this.#apply(course, session, decision, event);
     if (followUp?.end) {
       s.transcript.push({ who: 'tutor', text: speechText(decision.speech) });
@@ -272,6 +298,41 @@ export class Tutor {
     return null;
   }
 
+  // ---------- ASR evidence rules (pronounce and review exercises, voice answers) ----------
+
+  #evidence(session, ctx) {
+    const ev = ctx.roy_said?.asr_evaluation;
+    return ev && TERM_ANSWER.has(this.#exercise(session)) ? ev : null;
+  }
+
+  #guardConflict(session, ctx, d) {
+    const ev = this.#evidence(session, ctx);
+    if (!ev || d.intent !== 'answer') return null;
+    if (ev.level === 'clearly_incorrect' && claimsCorrect(d)) {
+      return { level: ev.level, message: `Your previous reply marked this answer correct, but the ASR evaluation is clearly_incorrect: the expected sounds of ${ev.expected} were not recognised in "${ev.transcript}". It must not be marked correct or complete. Reply again following asr_evaluation.how_to_respond.` };
+    }
+    if (ev.level === 'likely_correct_asr_character_mismatch' && d.correct === false) {
+      return { level: ev.level, message: `Your previous reply marked this answer wrong, but every syllable matched the expected sounds; only the recogniser's characters differ (${ev.explanation}). Do not tell Roy he mispronounced it and do not mark it wrong. Reply again following asr_evaluation.how_to_respond.` };
+    }
+    return null;
+  }
+
+  // Whatever the teacher says, the lesson state follows the evidence: a clearly
+  // wrong answer cannot complete the exercise, and a recogniser character error
+  // is never counted as Roy's mistake.
+  #enforceEvidence(session, ctx, d) {
+    const ev = this.#evidence(session, ctx);
+    if (!ev || d.intent !== 'answer') return;
+    if (ev.level === 'clearly_incorrect' && claimsCorrect(d)) {
+      console.warn('[tutor] ASR evidence: clearly incorrect answer not counted as correct');
+      Object.assign(d, { correct: false, exercise_complete: false, needs_retry: true });
+    }
+    if (ev.level === 'likely_correct_asr_character_mismatch' && d.correct === false) {
+      console.warn('[tutor] ASR evidence: recogniser character mismatch not counted as a mistake');
+      Object.assign(d, { correct: null, exercise_complete: false, needs_retry: true });
+    }
+  }
+
   // Everything the teacher needs for this turn.
   #context(course, session, event) {
     const s = session.state;
@@ -310,9 +371,9 @@ export class Tutor {
         recogniser_language: h.source === 'voice' ? h.language : null,
         recogniser_alternatives: h.alternatives,
         recogniser_confidence: h.confidence,
-        word_recognition: entry && mandarinExpected && h.source === 'voice' ? wordRecognitionReport(entry, h) : null,
+        asr_evaluation: entry && mandarinExpected && h.source === 'voice' ? asrEvaluationReport(entry, h, exercise) : null,
         pronunciation_assessment: null,
-        pronunciation_assessment_note: 'No audio analysis is available, so tones and accent cannot be judged.',
+        pronunciation_assessment_note: 'No audio analysis is available, so tones and accent cannot be judged directly; asr_evaluation compares the transcript with the expected sounds.',
       };
     }
     return ctx;
@@ -517,19 +578,20 @@ function newLesson(entryId, jump) {
   return { entryId, exercise: 'pronounce', passed: {}, attempts: 0, mistakes: 0, struggles: 0, jump };
 }
 
-function wordRecognitionReport(entry, heard) {
-  const r = checkWordRecognition(entry, heard);
+function asrEvaluationReport(entry, heard, exercise) {
+  const r = evaluateSpokenTerm(entry, heard.text);
   return {
-    what_this_is: 'Whether the speech recogniser wrote down the expected characters. Not a pronunciation or tone score.',
-    expected: entry.mandarin,
-    recogniser_top_result: r.heard,
-    result: {
-      correct: 'the top result contains the expected term',
-      close: 'the expected term appears only among the alternatives, or as pinyin letters',
-      partial: 'some of the expected characters were recognised',
-      incorrect: 'the expected characters were not recognised',
-    }[r.verdict],
-    characters_not_recognised: r.missing,
+    what_this_is: "The server's comparison of the speech recogniser's transcript with the current term, sound by sound (pinyin), not only character by character. The transcript is evidence, not ground truth: the recogniser often writes a different character with the same sound. This is not a tone score.",
+    applies_to: TERM_ANSWER.has(exercise) ? 'his answer should be the term itself' : 'whether the term appears in what he said (other words are expected in this exercise)',
+    level: r.level,
+    explanation: r.explanation,
+    expected: r.expected,
+    expected_pinyin: r.expected_pinyin,
+    transcript: r.heard,
+    characters: r.characters.map((c) => ({ expected: c.expected, expected_sound: c.expected_syllable, recogniser_wrote: c.heard, comparison: c.match })),
+    how_to_respond: TERM_ANSWER.has(exercise)
+      ? HOW_TO_RESPOND[r.level]
+      : 'Use this only to see whether the term was said; judge the rest of the answer yourself. A same-sound character is a recogniser error, not his mistake.',
   };
 }
 

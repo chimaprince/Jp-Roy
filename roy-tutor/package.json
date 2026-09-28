@@ -18,6 +18,7 @@
   },
   "dependencies": {
     "node-forge": "^1.4.0",
-    "openai": "^7.23.0"
+    "openai": "^7.23.0",
+    "pinyin-pro": "^3.29.4"
   }
 }
