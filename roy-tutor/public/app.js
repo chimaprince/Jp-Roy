@@ -6,7 +6,7 @@
 // the recogniser's other guesses and its confidence go to the server, where
 // the tutor evaluates them. No API keys live here.
 
-import { recognitionLang as toRecognitionLang, isChromeBrowser, LANGUAGE_LABEL, otherLanguage, lessonStateText, speechParts, friendlyError, RECOGNITION_ERRORS } from './voice-core.js';
+import { recognitionLang, LANGUAGE_LABEL, otherLanguage, lessonStateText, speechParts, friendlyError, RECOGNITION_ERRORS, VoiceInput, recognitionStatusText } from './voice-core.js';
 
 const $ = (id) => document.getElementById(id);
 const talkBtn = $('talk');
@@ -16,10 +16,11 @@ const heardEl = $('heard');
 const logEl = $('log');
 const lessonEl = $('lesson-state');
 const micLangBtn = $('mic-lang');
-const IS_CHROME = isChromeBrowser(navigator);
 const CAN_SPEAK = 'speechSynthesis' in window && typeof SpeechSynthesisUtterance !== 'undefined';
 
 const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+// Every recognition event is logged to the browser console as "[speech] ...".
+const voice = new VoiceInput(Recognition, { log: (m) => console.log(m) });
 
 const STATES = {
   idle: { badge: 'IDLE', button: '🎙 START TALKING' },
@@ -34,7 +35,6 @@ let listenLang = null; // the language the lesson expects next (from the server)
 let langOverride = null; // Roy switched the microphone language for this turn
 let mode = null;
 let ttsWarned = false;
-let recognizer = null;
 let turnsHeard = 0;
 let silentRetries = 0;
 let speechRun = 0; // bumps to cancel a speech sequence in progress
@@ -96,13 +96,9 @@ function micLang() {
   return langOverride ?? listenLang;
 }
 
-function recognitionLang(lang) {
-  return toRecognitionLang(lang, { isChrome: IS_CHROME });
-}
-
 function listeningHint() {
   const lang = micLang();
-  const heardAs = `Listening in ${LANGUAGE_LABEL[lang] ?? lang} (${recognitionLang(lang)}).`;
+  const heardAs = `Mic set to ${LANGUAGE_LABEL[lang] ?? lang} (${recognitionLang(lang)}).`;
   if (langOverride) return `${heardAs} Switched for this answer only.`;
   if (mode === 'pronunciation') return `${heardAs} Say the Mandarin term.`;
   if (lang?.startsWith('zh')) return `${heardAs} Answer in Mandarin.`;
@@ -213,78 +209,57 @@ function openTypeFallback(message) {
   setStatus(message);
 }
 
-function listen() {
-  if (!sessionOpen || !micLang()) { setState('idle'); setStatus('Tap START TALKING to continue.'); return; }
-  if (!Recognition) {
-    openTypeFallback('This browser has no speech recognition. Type your answer below, or use Chrome or Edge.');
+function listen(waited = 0) {
+  const lang = micLang();
+  if (!sessionOpen || !lang) { setState('idle'); setStatus('Tap START TALKING to continue.'); return; }
+  // Don't open the microphone while the teacher's voice is still playing:
+  // the recogniser would hear the teacher instead of Roy.
+  if (CAN_SPEAK && speechSynthesis.speaking && waited < 3000) { setTimeout(() => listen(waited + 250), 250); return; }
+  if (!voice.available) {
+    openTypeFallback('Speech recognition is not available in this browser. Use Chrome or Edge for voice, or type your answer below.');
     return;
   }
   const again = turnsHeard > 0;
-  recognizer = new Recognition();
-  const usedLang = micLang();
-  recognizer.lang = recognitionLang(usedLang);
-  recognizer.continuous = false;
-  recognizer.interimResults = true;
-  recognizer.maxAlternatives = 5;
-  let finalText = '';
-  let alternatives = [];
-  let confidence = null;
-  let failed = false;
-
-  recognizer.onresult = (e) => {
-    let interim = '';
-    for (let i = e.resultIndex; i < e.results.length; i++) {
-      const result = e.results[i];
-      if (result.isFinal) {
-        finalText += result[0].transcript;
-        confidence = result[0].confidence;
-        alternatives = Array.from(result).slice(1).map((a) => a.transcript);
-      } else {
-        interim += result[0].transcript;
-      }
-    }
-    showHeard((finalText + interim).trim());
-  };
-  recognizer.onerror = (e) => {
-    if (e.error === 'no-speech' || e.error === 'aborted') return; // handled in onend
-    failed = true;
-    openTypeFallback(RECOGNITION_ERRORS[e.error] ?? `Speech recognition stopped (${e.error}). Tap START TALKING to try again, or type below.`);
-  };
-  recognizer.onend = () => {
-    recognizer = null;
-    if (failed || state !== 'listening') return;
-    const text = finalText.trim();
-    if (text) {
+  setState('listening', { again });
+  showHeard('');
+  const label = `${LANGUAGE_LABEL[lang] ?? lang} (${recognitionLang(lang)})`;
+  voice.listen(lang, {
+    onStatus(kind, detail) {
+      if (kind === 'interim' || kind === 'final') { showHeard(detail.text, kind === 'final'); return; }
+      const text = recognitionStatusText(kind, detail, { language: label });
+      if (kind === 'listening' || kind === 'mic-on') setStatus(`${text} ${langOverride ? 'Switched for this answer only.' : hintFor(lang)} Tap the button to pause.`);
+      else if (text) setStatus(text);
+    },
+    onFinal({ text, alternatives, confidence, lang: usedLang }) {
       silentRetries = 0;
       turnsHeard += 1;
       showHeard(text, true);
       send(text, { source: 'voice', alternatives, confidence, language: usedLang });
-      return;
-    }
-    silentRetries += 1;
-    if (silentRetries <= 2) { listen(); return; }
-    setState('idle');
-    setStatus("I didn't hear anything. Tap START TALKING when you're ready.");
-  };
+    },
+    onEmpty(reason) {
+      // Nothing to send: never post an empty transcript. Retry a couple of times on silence.
+      if (reason === 'no-speech' && silentRetries < 2) { silentRetries += 1; listen(3000); return; }
+      setState('idle');
+      setStatus(reason === 'no-result'
+        ? RECOGNITION_ERRORS['no-result']
+        : "I didn't hear anything. Check the microphone, then tap START TALKING and speak.");
+    },
+    onError(code) {
+      if (code === 'unavailable') { openTypeFallback('Speech recognition is not available in this browser. Use Chrome or Edge for voice, or type your answer below.'); return; }
+      const message = RECOGNITION_ERRORS[code] ?? `Speech recognition stopped with the error "${code}". Tap START TALKING to try again, or type below.`;
+      if (['not-allowed', 'service-not-allowed', 'audio-capture', 'network'].includes(code)) openTypeFallback(message);
+      else { setState('idle'); setStatus(message); }
+    },
+  });
+}
 
-  setState('listening', { again });
-  setStatus(`${listeningHint()} Tap the button to pause.`);
-  showHeard('');
-  try {
-    recognizer.start();
-  } catch {
-    recognizer = null;
-    setState('idle');
-    setStatus('The microphone is busy. Tap START TALKING to try again.');
-  }
+function hintFor(lang) {
+  if (mode === 'pronunciation') return 'Say the Mandarin term.';
+  return lang?.startsWith('zh') ? 'Answer in Mandarin.' : 'Answer in English, in your own words.';
 }
 
 function stopListening() {
-  if (!recognizer) return;
-  recognizer.onend = null;
-  recognizer.onresult = null;
-  recognizer.abort();
-  recognizer = null;
+  voice.stop();
 }
 
 // ---------- flow ----------
@@ -318,6 +293,7 @@ async function send(text, meta = { source: 'text' }) {
     showHeard('');
     await handle(result);
   } catch (err) {
+    console.error('[tutor] message failed:', err);
     setState('idle');
     setStatus(`${friendlyError(err)} That answer was not counted; tap START TALKING and say it again.`);
     renderMicLang();
@@ -330,6 +306,7 @@ async function startSession() {
   try {
     await handle(await api('POST', '/api/session/start'));
   } catch (err) {
+    console.error('[tutor] start failed:', err);
     setState('idle');
     setStatus(friendlyError(err));
   }
@@ -379,7 +356,20 @@ $('type-form').addEventListener('submit', (e) => {
 if (CAN_SPEAK) speechSynthesis.getVoices();
 setState('idle');
 renderMicLang();
-if (!Recognition) setStatus('This browser has no speech recognition: use Chrome or Edge for voice, or type below.');
+if (!Recognition) {
+  document.querySelector('.type-instead').open = true;
+  setStatus('Speech recognition is not available in this browser: use Chrome or Edge for voice, or type below.');
+} else {
+  // Microphone permission (Chrome supports this query; other browsers may not).
+  navigator.permissions?.query({ name: 'microphone' }).then((perm) => {
+    const report = () => {
+      console.log(`[speech] microphone permission: ${perm.state}`);
+      if (perm.state === 'denied') setStatus(RECOGNITION_ERRORS['not-allowed']);
+    };
+    report();
+    perm.onchange = report;
+  }).catch(() => { /* permission query not supported: the first listen will tell us */ });
+}
 api('GET', '/api/status').then((s) => {
   renderStatus(s);
   if (s.session) renderView(s.session);
