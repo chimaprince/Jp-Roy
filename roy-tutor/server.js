@@ -1,5 +1,6 @@
 import { envFile, envKeysFromFile, envProblems } from './src/env.js'; // must stay the first import
 import http from 'node:http';
+import https from 'node:https';
 import OpenAI from 'openai'; // HTTP client for Qwen's OpenAI-compatible API (error types)
 import fs from 'node:fs';
 import path from 'node:path';
@@ -8,10 +9,18 @@ import { openDb } from './src/db.js';
 import { loadConfiguredCourses } from './src/curriculum.js';
 import { createTeacher } from './src/teacher.js';
 import { Tutor } from './src/tutor.js';
+import { serverUrls } from './src/network.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(here, 'public');
 const PORT = Number(process.env.PORT || 3000);
+// Development server: listen on every network adapter so a phone on the same
+// Wi-Fi can connect. Set HOST=127.0.0.1 to allow this computer only.
+const HOST = process.env.HOST || '0.0.0.0';
+// Optional HTTPS (needed for the microphone on a phone): paths to a
+// certificate and key, e.g. made with mkcert. Both must be set.
+const HTTPS_CERT = process.env.TUTOR_HTTPS_CERT || '';
+const HTTPS_KEY = process.env.TUTOR_HTTPS_KEY || '';
 // Optional shared passcode so the app is not open to anyone who finds the URL.
 const ACCESS_CODE = process.env.TUTOR_ACCESS_CODE || '';
 
@@ -84,7 +93,7 @@ const routes = {
   'POST /api/session/end': () => tutor.end(),
 };
 
-http.createServer(async (req, res) => {
+async function handler(req, res) {
   const route = routes[`${req.method} ${req.url.split('?')[0]}`];
   if (!route) return req.method === 'GET' ? serveStatic(req, res) : send(res, 404, { error: 'Not found' });
   if (ACCESS_CODE && req.headers['x-access-code'] !== ACCESS_CODE) return send(res, 401, { error: 'Access code required' });
@@ -100,4 +109,22 @@ http.createServer(async (req, res) => {
     }
     send(res, err.status === 413 ? 413 : 500, { error: err.status === 413 ? err.message : 'Something went wrong', code: null });
   }
-}).listen(PORT, () => console.log(`Roy Medical Chinese tutor on http://localhost:${PORT}`));
+}
+
+const secure = Boolean(HTTPS_CERT && HTTPS_KEY);
+const server = secure
+  ? https.createServer({ cert: fs.readFileSync(HTTPS_CERT), key: fs.readFileSync(HTTPS_KEY) }, handler)
+  : http.createServer(handler);
+
+server.listen(PORT, HOST, () => {
+  const urls = serverUrls({ host: HOST, port: PORT, secure });
+  console.log(`Roy Medical Chinese tutor on ${urls.local}`);
+  if (urls.lan.length) {
+    console.log('On your phone (same Wi-Fi), open:');
+    for (const a of urls.lan) console.log(`  ${a.url}   (${a.name})`);
+    if (!secure) console.log('  Note: phones only allow the microphone on https:// or localhost. See README "Testing on a phone".');
+    if (!ACCESS_CODE) console.log('  Tip: set TUTOR_ACCESS_CODE so other people on this network cannot use your Qwen quota.');
+  } else if (HOST !== '0.0.0.0' && HOST !== '::') {
+    console.log(`Listening on ${HOST} only (not reachable from other devices).`);
+  }
+});

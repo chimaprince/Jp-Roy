@@ -90,6 +90,7 @@ export const RECOGNITION_ERRORS = {
   'start-timeout': "Speech recognition did not start. Reload the page; if it keeps happening, restart Chrome.",
   'no-result': 'Sound was heard but no words were recognised. Speak a little louder and closer to the microphone, check the language shown above, then tap START TALKING.',
   timeout: 'Listening took too long without a result, so it was stopped. Tap START TALKING to try again.',
+  'insecure-context': 'This page was opened over plain http:// from another device, so the browser blocks the microphone here. You can type your answers below, or open the tutor over https:// (see "Testing on a phone" in the README).',
 };
 
 // ---------- speech recognition controller ----------

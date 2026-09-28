@@ -215,6 +215,7 @@ function listen(waited = 0) {
   // Don't open the microphone while the teacher's voice is still playing:
   // the recogniser would hear the teacher instead of Roy.
   if (CAN_SPEAK && speechSynthesis.speaking && waited < 3000) { setTimeout(() => listen(waited + 250), 250); return; }
+  if (!window.isSecureContext) { openTypeFallback(RECOGNITION_ERRORS['insecure-context']); return; }
   if (!voice.available) {
     openTypeFallback('Speech recognition is not available in this browser. Use Chrome or Edge for voice, or type your answer below.');
     return;
@@ -356,7 +357,11 @@ $('type-form').addEventListener('submit', (e) => {
 if (CAN_SPEAK) speechSynthesis.getVoices();
 setState('idle');
 renderMicLang();
-if (!Recognition) {
+if (!window.isSecureContext) {
+  // Browsers only allow the microphone on https:// or localhost.
+  document.querySelector('.type-instead').open = true;
+  setStatus(RECOGNITION_ERRORS['insecure-context']);
+} else if (!Recognition) {
   document.querySelector('.type-instead').open = true;
   setStatus('Speech recognition is not available in this browser: use Chrome or Edge for voice, or type below.');
 } else {

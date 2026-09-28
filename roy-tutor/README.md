@@ -41,8 +41,69 @@ on the server (one corrected retry, then an error).
 | `TUTOR_TIMEZONE` | Roy's time zone (for example `Asia/Shanghai`), used to decide when a new study day starts. |
 | `TUTOR_DB` | SQLite file path, default `roy-tutor/tutor.db`. |
 | `PORT` | Default `3000`. |
+| `HOST` | Default `0.0.0.0` (reachable from your phone on the same Wi-Fi); `127.0.0.1` for this computer only. |
+| `TUTOR_HTTPS_CERT`, `TUTOR_HTTPS_KEY` | Optional certificate and key files to serve over https (needed for the phone microphone). |
 
 The API key is only read by the server (`src/teacher.js`). The browser never sees it.
+
+## Testing on a phone (same Wi-Fi)
+
+This is a local development setup, not a public deployment.
+
+The server listens on all network adapters (`HOST=0.0.0.0`, the default) and
+prints the address to use, for example:
+
+```
+Roy Medical Chinese tutor on http://localhost:3000
+On your phone (same Wi-Fi), open:
+  http://192.168.1.23:3000   (Wi-Fi)
+```
+
+`http://localhost:3000` keeps working on the laptop. Set `HOST=127.0.0.1` to
+turn phone access off. Only the files in `public/` are served; `.env` and the
+Qwen key stay on the laptop. Set `TUTOR_ACCESS_CODE` in `.env` so nobody else on
+the network can use your Qwen quota (the page asks for it once).
+
+**Windows Firewall.** The first time `npm start` listens on the network,
+Windows shows "Windows Defender Firewall has blocked some features of
+Node.js". Tick **Private networks** only and click **Allow access**. Your home
+Wi-Fi must be set to *Private* (Settings → Network & internet → Wi-Fi → your
+network → Network profile type → Private). If you dismissed the prompt, run
+PowerShell as administrator:
+
+```
+New-NetFirewallRule -DisplayName "Roy tutor (dev) 3000" -Direction Inbound -Protocol TCP -LocalPort 3000 -Profile Private -Action Allow
+```
+
+(remove it later with `Remove-NetFirewallRule -DisplayName "Roy tutor (dev) 3000"`).
+
+**The microphone needs https or localhost.** Phone browsers block the
+microphone and speech recognition on plain `http://192.168.x.x`. The page
+still works there (the teacher speaks; you can type), and it says why the
+microphone is off. To talk from the phone, use one of these:
+
+1. *Android Chrome, quickest:* on the phone open
+   `chrome://flags/#unsafely-treat-insecure-origin-as-secure`, enter
+   `http://192.168.1.23:3000` (your address), set it to Enabled, relaunch
+   Chrome. For testing only.
+2. *USB cable (Android):* enable USB debugging on the phone, connect it, open
+   `chrome://inspect/#devices` on the laptop, add port forwarding
+   `3000 → localhost:3000`, then open `http://localhost:3000` on the phone.
+3. *HTTPS with a local certificate (Android or iPhone):* install mkcert
+   (`winget install FiloSottile.mkcert`), run `mkcert -install` and
+   `mkcert -cert-file certs/lan.pem -key-file certs/lan-key.pem 192.168.1.23 localhost`
+   in `roy-tutor`, add to `.env`:
+   ```
+   TUTOR_HTTPS_CERT=certs/lan.pem
+   TUTOR_HTTPS_KEY=certs/lan-key.pem
+   ```
+   restart, and open `https://192.168.1.23:3000`. The phone must trust
+   mkcert's root certificate (`mkcert -CAROOT` shows where `rootCA.pem` is;
+   install it on the phone as a CA certificate). `certs/` is ignored by Git.
+
+Speech recognition on the phone also needs the phone's own internet access
+(Chrome sends the audio to Google). iPhone Safari's speech recognition is
+less reliable than Chrome's.
 
 ## How the tutor works
 
