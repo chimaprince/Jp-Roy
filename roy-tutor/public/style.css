@@ -131,3 +131,5 @@ h1 { margin: 0; font-size: 1.5rem; letter-spacing: 0.06em; }
 }
 .listen-controls button:disabled { opacity: 0.4; cursor: default; }
 .listen-exit { width: 100%; margin-top: 8px; font-weight: 600; color: var(--muted); }
+.listen-now { white-space: pre-line; }
+.listen-source { color: var(--muted); font-size: 0.8rem; min-height: 1.2em; margin: -4px 0 8px; }

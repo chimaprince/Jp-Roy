@@ -265,32 +265,51 @@ audio-based scoring later.
 ## Listen & Learn
 
 The home screen shows Roy's current word and two buttons: **🎙 Interactive
-Practice** (the voice lessons above) and **🎧 Listen & Learn**. In Listen & Learn
-Roy only listens. Nothing is asked, the microphone is never used, and no
-progress changes. For each word the Qwen voice:
+Practice** (the voice lessons above) and **🎧 Listen & Learn**. Listen & Learn is
+for earphones. Press it, put the phone down, and the Qwen voice (Cherry) teaches
+word after word, in curriculum order, until you pause. Nothing is asked and the
+microphone is never used.
 
-1. says the Mandarin term clearly;
-2. says it again, slowly, with the **pinyin shown on screen** (pinyin is never
+For each word:
+
+1. the Mandarin term, clearly;
+2. the term again, slowly, with the **pinyin shown on screen** (pinyin is never
    sent to the voice; a Mandarin voice reads characters, not letters);
-3. gives the English;
-4. reads the JH Medics medical meaning, verbatim;
-5. goes syllable by syllable, shown as `硬 yìng · 膜 mó · 外 wài`, but only
-   when every character has a single reading, so the voice cannot choose a
-   wrong one;
-6. says the term once more.
+3. the English;
+4. the JH Medics medical meaning, verbatim;
+5. syllable by syllable (`硬 yìng · 膜 mó · 外 wài`), only when every character
+   has a single reading, so the voice cannot choose a wrong one;
+6. where the term is used in medical situations;
+7. an example sentence that uses the exact term, in Mandarin;
+8. its English translation;
+9. a practical doctor/patient/interpreter situation;
+10. the term once more.
 
-JH Medics Volume 1 has no example sentences, so there is no sentence step and
-none is invented. Sentences are practised in Interactive Practice.
+Then, after a short pause, the next word starts by itself.
 
-Controls: **▶ Play**, **⏸ Pause**, **↻ Repeat** (this step again, or the whole
-word once finished), **→ Next** (the next word in book order), and **Exit
-Listen Mode**. Listening to later words is only a preview: Roy's place in the
-curriculum moves only by completing words in Interactive Practice. The lesson
-comes from `GET /api/listen?position=N` (read-only). Each line is synthesised
-once and reused on repeats, to save TTS quota.
+Items 1-5 come from JH Medics. Volume 1 has no example sentences, so 6-9 are
+written by the Qwen teacher, once per word (`src/listencontent.js`), and marked
+on screen as "Example written by the AI teacher". The writer is given only that
+curriculum entry. Its reply is checked: the sentence must contain the exact term,
+be short, and be Mandarin only; the other parts must be English only. It gets one
+correction round. Accepted material is stored in SQLite (`listen_content`), so
+every later listen uses the same text at no extra cost. If Qwen is unavailable, a
+plain template sentence is used for that lesson and not stored.
 
-Typing (the "type instead" box) is a fallback. Typed answers go to the same AI
-teacher, marked as typed, and no pronunciation is claimed for them.
+Controls: **▶ Play / ⏸ Pause** (resume continues the interrupted step);
+**↻ Repeat** (this word's whole lesson again); **→ Next** (optional: skip to the
+next word now); **Exit Listen Mode**.
+
+**Listening progress** is separate from Interactive Practice. A word counts as
+listened only when every step of its lesson has played to the end (not when its
+audio was generated, and not when it was skipped or its audio failed). The page
+then reports it (`POST /api/listen/complete`). Listening continues from the
+first word, in curriculum order, that has not been listened to, so a skipped
+word stays unfinished. Listening never completes a word, starts a session or
+moves Roy's place in Interactive Practice. Lessons come from
+`GET /api/listen?position=N` (default: where listening continues); the next
+word is fetched while the current one plays. Each line is synthesised once and
+reused.
 
 ## What Roy can say
 
@@ -324,7 +343,8 @@ src/teacher.js         the AI teacher (Qwen, server side only)
 src/voice.js           Qwen speech recognition and teacher voice (server side only)
 src/recognition.js     pinyin helpers; pronunciation-scoring hook
 src/evaluation.js      ASR-aware answer evaluation (same sound vs same character)
-src/listen.js          Listen & Learn lesson script from the curriculum
+src/listen.js          Listen & Learn lesson script
+src/listencontent.js   Listen & Learn: the teacher's example sentence and usage (checked, stored)
 src/intents.js         resolves a jump target to a curriculum entry
 src/match.js           text normalisation helpers
 src/db.js              SQLite schema and queries
@@ -337,7 +357,9 @@ Database tables: `courses`, `curriculum` (id, course_id, position, english,
 mandarin, pinyin, meaning, source_page), `user_progress` (user, course,
 current_position, last_study_date, last_session, review_required),
 `entry_progress` (entry, completed, times_practiced, last_reviewed, confidence,
-weak) and `study_sessions` (words studied, words reviewed, weak words, summary).
+weak), `study_sessions` (words studied, words reviewed, weak words, summary),
+`listen_content` (the teacher's Listen & Learn material per entry) and
+`listen_progress` (words whose Listen & Learn lesson finished playing).
 
 ## Curriculum
 

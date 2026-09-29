@@ -5,13 +5,14 @@ import OpenAI from 'openai'; // HTTP client for Qwen's OpenAI-compatible API (er
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { openDb, activeCourse, entryAt } from './src/db.js';
+import { openDb, activeCourse, entryAt, getListenContent, saveListenContent, markListened, listenPosition, listenedCount } from './src/db.js';
 import { loadConfiguredCourses } from './src/curriculum.js';
 import { createTeacher } from './src/teacher.js';
 import { Tutor } from './src/tutor.js';
 import { serverUrls } from './src/network.js';
 import { createSetupServer } from './src/devsetup.js';
 import { listenLesson } from './src/listen.js';
+import { createListenWriter, templateContent } from './src/listencontent.js';
 import { createVoice, SpeechStore, VoiceError, audioMime, MAX_AUDIO_BYTES, asrEndpointProblem } from './src/voice.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -120,19 +121,63 @@ const routes = {
   'POST /api/session/end': async () => withVoice(await tutor.end()),
 };
 
-// Listen & Learn: the spoken lesson for one word, with Qwen TTS audio for each
-// step. Read only: no session, no progress change, no microphone.
-// ?position=N (default: Roy's current curriculum word); ?audio=0 for the text only.
-function listenRoute(url) {
+// Listen & Learn. Read-only for lessons: no session, no Interactive Practice
+// progress, no microphone. The only write is the listening record, and only
+// when the page reports that a word's whole lesson has finished playing.
+const USER_ID = process.env.TUTOR_USER_ID || 'roy';
+const listenWriter = createListenWriter();
+const writing = new Map(); // entry id -> pending example, so one word is written once
+
+async function listenContent(entry, { generate }) {
+  const saved = getListenContent(db, entry.id);
+  if (saved) return saved;
+  if (!generate) return templateContent(entry);
+  if (!writing.has(entry.id)) {
+    writing.set(entry.id, listenWriter.write(entry).then(({ content, source }) => {
+      if (source === 'teacher') saveListenContent(db, entry.id, content, listenWriter.model);
+      return content;
+    }).finally(() => writing.delete(entry.id)));
+  }
+  return writing.get(entry.id);
+}
+
+function listenPlace(course) {
+  const total = tutor.status().total;
+  return { listenPosition: listenPosition(db, USER_ID, course.id), listened: listenedCount(db, USER_ID, course.id), total };
+}
+
+function listenCourse() {
   const course = activeCourse(db);
   if (!course) throw Object.assign(new Error('No curriculum is loaded.'), { status: 404 });
-  const st = tutor.status();
-  const total = st.total;
-  const raw = url.searchParams.get('position');
-  const position = raw === null ? Math.min(st.position ?? 1, total) : Number(raw);
+  return course;
+}
+
+function wordAt(course, raw, fallback) {
+  const total = tutor.status().total;
+  const position = raw === null || raw === undefined ? fallback : Number(raw);
   if (!Number.isInteger(position) || position < 1 || position > total) throw Object.assign(new Error(`Word ${raw} is not in the curriculum (1-${total}).`), { status: 400 });
-  const lesson = { ...listenLesson(entryAt(db, course.id, position), total), curriculumPosition: st.position ?? null };
-  return url.searchParams.get('audio') === '0' ? lesson : speech.attachTo(lesson, 'steps');
+  return entryAt(db, course.id, position);
+}
+
+// GET /api/listen?position=N  the lesson for word N (default: where listening
+// continues), with Qwen TTS audio per step. ?audio=0: text only, nothing generated.
+async function listenRoute(url) {
+  const course = listenCourse();
+  const place = listenPlace(course);
+  const entry = wordAt(course, url.searchParams.get('position'), place.listenPosition ?? 1);
+  const textOnly = url.searchParams.get('audio') === '0';
+  const content = await listenContent(entry, { generate: !textOnly });
+  const lesson = { ...listenLesson(entry, place.total, content), ...place, curriculumPosition: tutor.status().position ?? null };
+  return textOnly ? lesson : speech.attachTo(lesson, 'steps');
+}
+
+// POST /api/listen/complete {position}  the page played every step of this
+// word's lesson. Listening continues from the first unfinished word.
+function listenCompleteRoute(body) {
+  const course = listenCourse();
+  const entry = wordAt(course, body?.position, null);
+  markListened(db, USER_ID, entry.id);
+  return { finished: entry.position, ...listenPlace(course) };
 }
 
 // The entry the lesson is on now, read from the curriculum (the card hides the
@@ -172,9 +217,15 @@ async function handler(req, res) {
   const url = new URL(req.url, 'http://localhost');
   const route = routes[`${req.method} ${url.pathname}`];
   const isVoice = url.pathname.startsWith('/api/voice/');
-  if (req.method === 'GET' && url.pathname === '/api/listen') {
+  const isListen = (req.method === 'GET' && url.pathname === '/api/listen') || (req.method === 'POST' && url.pathname === '/api/listen/complete');
+  if (isListen) {
     if (ACCESS_CODE && req.headers['x-access-code'] !== ACCESS_CODE) return send(res, 401, { error: 'Access code required' });
-    try { return send(res, 200, listenRoute(url)); } catch (err) { return send(res, err.status ?? 500, { error: err.status ? err.message : 'Something went wrong' }); }
+    try {
+      return send(res, 200, req.method === 'GET' ? await listenRoute(url) : listenCompleteRoute(await readJson(req)));
+    } catch (err) {
+      if (!err.status) console.error(err);
+      return send(res, err.status ?? 500, { error: err.status ? err.message : 'Something went wrong' });
+    }
   }
   if (!route && !isVoice) return req.method === 'GET' ? serveStatic(req, res) : send(res, 404, { error: 'Not found' });
   if (ACCESS_CODE && req.headers['x-access-code'] !== ACCESS_CODE) return send(res, 401, { error: 'Access code required' });

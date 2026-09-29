@@ -212,24 +212,35 @@ export function playbackRate(seg) {
 
 // ---------- Listen & Learn ----------
 //
-// Plays one word's lesson step by step, with Play / Pause / Repeat / Next.
-// No microphone, no answers: Roy only listens. The page supplies:
-//   playStep(step)  plays one step's audio; resolves when it ends
-//                   (rejects if the audio failed: the text stays on screen and
-//                   the lesson moves on)
-//   stopAudio()     stops whatever is playing
-//   loadLesson(position) fetches the lesson for a word
-//   onChange(view)  redraw
-// States: idle (nothing loaded), loading, playing, paused, finished.
+// Plays word lessons one after another, in curriculum order, until Roy pauses:
+// put on earphones, press Listen & Learn, put the phone down. The page supplies:
+//   playStep(step)   plays one step's audio; resolves when it ends (rejects if
+//                    the audio failed: the text stays on screen and the lesson
+//                    moves on)
+//   stopAudio()      stops whatever is playing
+//   loadLesson(pos)  fetches the lesson for a word (undefined: where listening
+//                    continues)
+//   onComplete(lesson)  called once when every step of a word has played
+//                    (not when it was skipped, interrupted or failed)
+//   onChange(view)   redraw
+// States: idle, loading, playing, paused, gap (between words), finished (the
+// last word of the curriculum is done).
+// Controls: Play/Pause; Repeat = this word's lesson from the start; Next =
+// skip to the next word now (a skipped word is not counted as listened).
+
+export const AUTO_ADVANCE_GAP_MS = 1500;
 
 export class ListenController {
-  constructor({ playStep, stopAudio = () => {}, loadLesson, onChange = () => {}, onError = () => {} }) {
-    Object.assign(this, { playStep, stopAudio, loadLesson, onChange, onError });
+  constructor({ playStep, stopAudio = () => {}, loadLesson, onChange = () => {}, onError = () => {}, onComplete = () => {}, gapMs = AUTO_ADVANCE_GAP_MS, wait }) {
+    Object.assign(this, { playStep, stopAudio, loadLesson, onChange, onError, onComplete, gapMs });
+    this.wait = wait ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
     this.lesson = null;
     this.index = 0;
     this.state = 'idle';
     this.run = 0; // bumps to cancel a playing sequence
     this.failedSteps = 0;
+    this.played = new Set(); // steps of this word whose audio played to the end
+    this.prefetched = null; // { position, promise } for the next word
   }
 
   get view() {
@@ -250,13 +261,32 @@ export class ListenController {
     this.onChange(this.view);
   }
 
+  #fetch(position) {
+    if (position !== undefined && this.prefetched?.position === position) {
+      const { promise } = this.prefetched;
+      this.prefetched = null;
+      return promise;
+    }
+    return this.loadLesson(position);
+  }
+
+  // Start fetching the next word while this one plays, so the flow is seamless.
+  #prefetchNext() {
+    if (!this.lesson || this.lesson.position >= this.lesson.total) return;
+    const position = this.lesson.position + 1;
+    if (this.prefetched?.position === position) return;
+    const promise = this.loadLesson(position);
+    promise.catch(() => { if (this.prefetched?.promise === promise) this.prefetched = null; });
+    this.prefetched = { position, promise };
+  }
+
   async open(position) {
     const run = ++this.run;
     this.stopAudio();
     this.#set('loading');
     let lesson;
     try {
-      lesson = await this.loadLesson(position);
+      lesson = await this.#fetch(position);
     } catch (err) {
       if (run === this.run) { this.#set(this.lesson ? 'paused' : 'idle'); this.onError(err); }
       return;
@@ -265,14 +295,17 @@ export class ListenController {
     this.lesson = lesson;
     this.index = 0;
     this.failedSteps = 0;
+    this.played = new Set();
     await this.#playFrom(run);
   }
 
   async #playFrom(run) {
     this.#set('playing');
+    this.#prefetchNext();
     while (run === this.run && this.index < this.lesson.steps.length) {
       try {
         await this.playStep(this.lesson.steps[this.index]);
+        if (run === this.run) this.played.add(this.index);
       } catch (err) {
         if (run !== this.run) return;
         this.failedSteps += 1;
@@ -282,38 +315,50 @@ export class ListenController {
       this.index += 1;
       if (this.index < this.lesson.steps.length) this.onChange(this.view);
     }
-    if (run === this.run) {
-      this.index = this.lesson.steps.length - 1;
-      this.#set('finished');
+    if (run !== this.run) return;
+    this.index = this.lesson.steps.length - 1;
+    // Every step's audio played to the end (a pause in between is fine).
+    if (this.played.size === this.lesson.steps.length) {
+      try { await this.onComplete(this.lesson); } catch (err) { this.onError(err); }
+      if (run !== this.run) return;
     }
+    if (this.lesson.position >= this.lesson.total) { this.#set('finished'); return; }
+    // Automatically continue with the next word.
+    this.#set('gap');
+    await this.wait(this.gapMs);
+    if (run !== this.run) return;
+    await this.open(this.lesson.position + 1);
   }
 
-  // Play: start the current word, resume after Pause (from the start of the
-  // step that was interrupted), or play the word again once finished.
+  // Play: start where listening continues, resume after Pause (from the start
+  // of the interrupted step), or go on after the last word was reached.
   play() {
     if (!this.lesson) return this.open(undefined);
     if (this.state === 'playing' || this.state === 'loading') return undefined;
+    if (this.state === 'gap') return this.open(this.lesson.position + 1);
     if (this.state === 'finished') this.index = 0;
     return this.#playFrom(++this.run);
   }
 
   pause() {
-    if (this.state !== 'playing') return;
+    if (this.state !== 'playing' && this.state !== 'gap' && this.state !== 'loading') return;
     this.run += 1;
     this.stopAudio();
     this.#set('paused');
   }
 
-  // Repeat: the step on screen again (or the whole word once it has finished).
+  // Repeat: this word's whole lesson again, from the start.
   repeat() {
     if (!this.lesson) return undefined;
     this.run += 1;
     this.stopAudio();
-    if (this.state === 'finished') this.index = 0;
+    this.index = 0;
+    this.failedSteps = 0;
+    this.played = new Set();
     return this.#playFrom(this.run);
   }
 
-  // Next: the next word in curriculum order (never skips ahead).
+  // Next: skip to the next word now (in curriculum order, never past the end).
   next() {
     if (!this.lesson || this.lesson.position >= this.lesson.total) return undefined;
     return this.open(this.lesson.position + 1);
@@ -323,6 +368,7 @@ export class ListenController {
     this.run += 1;
     this.stopAudio();
     this.lesson = null;
+    this.prefetched = null;
     this.index = 0;
     this.#set('idle');
   }
@@ -332,6 +378,7 @@ export const LISTEN_STATE_TEXT = {
   idle: '',
   loading: 'Preparing the lesson…',
   playing: 'Playing',
-  paused: 'Paused',
-  finished: 'Finished this word. ↻ Repeat to hear it again, or → Next for the next word.',
+  paused: 'Paused. ▶ Play to continue.',
+  gap: 'Next word coming up…',
+  finished: 'That was the last word of the curriculum.',
 };

@@ -551,6 +551,7 @@ if (!window.isSecureContext) {
 
 let learnMode = null; // null (home), 'interactive' or 'listen'
 let curriculumPosition = null;
+let listenedWords = null; // latest count from the server (lessons are fetched ahead, so theirs can be stale)
 
 function notice(text) {
   $('notice').textContent = text || '';
@@ -595,7 +596,8 @@ $('mode-listen').addEventListener('click', () => {
   unlockAudio(); // this tap lets iPhone Safari play the lesson audio
   leaveInteractive();
   showMode('listen');
-  listenPlayer.open(listenPlayer.view.position ?? curriculumPosition ?? 1);
+  // Continue where listening stopped (the server knows the first unfinished word).
+  listenPlayer.open(listenPlayer.view.position ?? undefined);
 });
 
 // ---------- Listen & Learn: Qwen TTS lessons, no microphone ----------
@@ -621,6 +623,13 @@ const listenPlayer = new ListenController({
   stopAudio: stopSpeaking,
   loadLesson: (position) => api('GET', `/api/listen${position ? `?position=${position}` : ''}`),
   onChange: renderListen,
+  // Only called when every step of a word has played: record it, so listening
+  // continues from the next unfinished word next time.
+  onComplete: async (lesson) => {
+    const place = await api('POST', '/api/listen/complete', { position: lesson.position });
+    listenedWords = place.listened;
+    renderListen(listenPlayer.view);
+  },
   onError: (err) => {
     console.error('[listen]', err);
     if (err?.code === 'play-blocked') { listenPlayer.pause(); notice(VOICE_ERRORS['play-blocked']); }
@@ -631,18 +640,21 @@ function renderListen(view) {
   const lesson = listenPlayer.lesson;
   if (lesson) {
     renderView({ card: lesson.card, stage: null });
-    const place = lesson.curriculumPosition && lesson.curriculumPosition !== lesson.position ? ` · your place: Word ${lesson.curriculumPosition}` : '';
-    $('listen-where').textContent = `Listening: Word ${lesson.position} of ${lesson.total}${place}`;
+    const practice = lesson.curriculumPosition ? ` · Interactive Practice: Word ${lesson.curriculumPosition}` : '';
+    const listened = Math.max(listenedWords ?? 0, lesson.listened ?? 0);
+    $('listen-where').textContent = `Listening: Word ${lesson.position} of ${lesson.total} · ${listened} ${listened === 1 ? 'word' : 'words'} listened${practice}`;
   }
   const step = view.step;
   const nowEl = $('listen-now');
   nowEl.textContent = step ? step.show || step.text : '';
   nowEl.classList.toggle('zh', step?.lang === 'zh');
   nowEl.lang = step?.lang === 'zh' ? 'zh-CN' : 'en';
+  $('listen-source').textContent = step?.source === 'teacher' ? 'Example written by the AI teacher (not from JH Medics)'
+    : step?.source === 'template' ? 'Simple example (the AI teacher was unavailable)' : '';
   $('listen-state').dataset.state = view.state;
   $('listen-state').textContent = view.state === 'playing' && view.steps ? `Playing ${view.index + 1} of ${view.steps}` : LISTEN_STATE_TEXT[view.state];
   $('listen-play').disabled = view.state === 'playing' || view.state === 'loading';
-  $('listen-pause').disabled = view.state !== 'playing';
+  $('listen-pause').disabled = !['playing', 'gap', 'loading'].includes(view.state);
   $('listen-repeat').disabled = !lesson || view.state === 'loading';
   $('listen-next').disabled = !view.canNext || view.state === 'loading';
 }

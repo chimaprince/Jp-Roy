@@ -61,6 +61,25 @@ CREATE TABLE IF NOT EXISTS study_sessions (
   summary       TEXT,
   state         TEXT NOT NULL DEFAULT '{}'
 );
+
+-- Listen & Learn: the teacher's example sentence and usage notes for an entry,
+-- generated once by Qwen and kept (the curriculum itself is never changed).
+CREATE TABLE IF NOT EXISTS listen_content (
+  entry_id   INTEGER PRIMARY KEY REFERENCES curriculum(id),
+  content    TEXT NOT NULL,
+  model      TEXT,
+  created_at TEXT NOT NULL
+);
+
+-- Listen & Learn: words whose whole lesson has finished playing. Separate from
+-- entry_progress: listening never completes a word in Interactive Practice.
+CREATE TABLE IF NOT EXISTS listen_progress (
+  user_id     TEXT NOT NULL REFERENCES users(id),
+  entry_id    INTEGER NOT NULL REFERENCES curriculum(id),
+  times       INTEGER NOT NULL DEFAULT 0,
+  finished_at TEXT NOT NULL,
+  PRIMARY KEY (user_id, entry_id)
+);
 `;
 
 export function openDb(file = process.env.TUTOR_DB || 'tutor.db') {
@@ -180,4 +199,38 @@ export function openSessionForDate(db, userId, courseId, studyDate) {
     SELECT id FROM study_sessions WHERE user_id = ? AND course_id = ? AND study_date = ?
     ORDER BY id DESC LIMIT 1`).get(userId, courseId, studyDate);
   return row ? getSession(db, row.id) : null;
+}
+
+// ---------- Listen & Learn ----------
+
+export function getListenContent(db, entryId) {
+  const row = db.prepare('SELECT content FROM listen_content WHERE entry_id = ?').get(entryId);
+  return row ? JSON.parse(row.content) : null;
+}
+
+export function saveListenContent(db, entryId, content, model, now = new Date().toISOString()) {
+  db.prepare('INSERT OR REPLACE INTO listen_content (entry_id, content, model, created_at) VALUES (?, ?, ?, ?)').run(entryId, JSON.stringify(content), model ?? null, now);
+}
+
+export function markListened(db, userId, entryId, now = new Date().toISOString()) {
+  db.prepare(`INSERT INTO listen_progress (user_id, entry_id, times, finished_at) VALUES (?, ?, 1, ?)
+    ON CONFLICT(user_id, entry_id) DO UPDATE SET times = times + 1, finished_at = excluded.finished_at`).run(userId, entryId, now);
+}
+
+// Where Listen & Learn continues: the first word, in curriculum order, whose
+// lesson has not finished yet (a skipped word stays unfinished).
+export function listenPosition(db, userId, courseId) {
+  const row = db.prepare(`SELECT MIN(c.position) AS position FROM curriculum c
+    LEFT JOIN listen_progress l ON l.entry_id = c.id AND l.user_id = ?
+    WHERE c.course_id = ? AND l.entry_id IS NULL`).get(userId, courseId);
+  return row?.position ?? null; // null: every word listened to
+}
+
+export function listenedCount(db, userId, courseId) {
+  return db.prepare(`SELECT COUNT(*) AS n FROM listen_progress l JOIN curriculum c ON c.id = l.entry_id
+    WHERE l.user_id = ? AND c.course_id = ?`).get(userId, courseId).n;
+}
+
+export function wasListened(db, userId, entryId) {
+  return Boolean(db.prepare('SELECT 1 FROM listen_progress WHERE user_id = ? AND entry_id = ?').get(userId, entryId));
 }
