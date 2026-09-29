@@ -233,7 +233,10 @@ async function handler(req, res) {
   if (isListen) {
     if (ACCESS_CODE && req.headers['x-access-code'] !== ACCESS_CODE) return send(res, 401, { error: 'Access code required' });
     try {
-      return send(res, 200, req.method === 'GET' ? await listenRoute(url) : listenCompleteRoute(await readJson(req)));
+      if (req.method === 'GET') return send(res, 200, await listenRoute(url));
+      // Queued with lesson turns: it may move today's Interactive session on.
+      const body = await readJson(req);
+      return send(res, 200, await serial(() => listenCompleteRoute(body)));
     } catch (err) {
       if (!err.status) console.error(err);
       return send(res, err.status ?? 500, { error: err.status ? err.message : 'Something went wrong' });

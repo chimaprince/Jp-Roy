@@ -1,17 +1,14 @@
 // Listen & Learn: lessons with practical usage, continuous play through the
-// curriculum, Next/Repeat/Pause, listening progress, and no microphone.
+// curriculum, Next/Repeat/Pause/resume, and no microphone. (Progress and the
+// server routes: progress.test.js.)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import http from 'node:http';
-import net from 'node:net';
-import os from 'node:os';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { listenLesson, REQUIRED_STEPS } from '../src/listen.js';
+import { listenLesson, REQUIRED_STEPS, REVIEW_STEPS } from '../src/listen.js';
 import { checkListenContent, templateContent, createListenWriter } from '../src/listencontent.js';
-import { ListenController, encodeWav } from '../public/voice-core.js';
+import { ListenController } from '../public/voice-core.js';
 
 const appDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const HAN = /\p{Script=Han}/u;
@@ -76,6 +73,15 @@ test('all 385 words: practical usage, a sentence with the exact word, medical co
       }
     }
   }
+});
+
+test('a review lesson (new study day) is the short version: word, pinyin, English, sentence, translation, word again', () => {
+  const l = listenLesson(SHIDAO, 385, TEACHER_SHIDAO, { review: true });
+  const kinds = l.steps.map((s) => s.kind);
+  for (const k of REVIEW_STEPS) assert.ok(kinds.includes(k), `has ${k}`);
+  assert.ok(!kinds.includes('meaning') && !kinds.includes('usage'), 'short');
+  assert.match(l.steps[0].text, /^Review: word 2\./);
+  assert.equal(l.steps.at(-1).text, '食道');
 });
 
 test('the teacher\'s example is checked: exact word, short, Mandarin only in the sentence, English only elsewhere', () => {

@@ -6,7 +6,6 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import http from 'node:http';
-import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
@@ -15,6 +14,7 @@ import { openDb, getProgress, getEntryProgress, activeCourse, entryAt } from '..
 import { upsertCourse, importEntries } from '../src/curriculum.js';
 import { Tutor } from '../src/tutor.js';
 import { encodeWav } from '../public/voice-core.js';
+import { freePort, cleanEnv } from './helpers.js';
 
 const FIXTURE = [
   { position: 1, english: 'epidural', mandarin: '硬膜外', pinyin: 'yìng mó wài', meaning: "Injection into a person's spine", source_page: '1' },
@@ -208,10 +208,6 @@ test('natural answers through the engine: "I don\'t know", "I don\'t understand"
 // ---------- the real server ----------
 
 const KEY = 'test-key-not-real-progress-5555';
-const cleanEnv = () => Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(QWEN_|DASHSCOPE_|TUTOR_)/.test(k)));
-const freePort = () => new Promise((resolve, reject) => {
-  const probe = net.createServer().once('error', reject).listen(0, () => { const { port } = probe.address(); probe.close(() => resolve(port)); });
-});
 const appDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 // Stand-in for Qwen: the listen writer (chat; `writer` decides the reply) and TTS.

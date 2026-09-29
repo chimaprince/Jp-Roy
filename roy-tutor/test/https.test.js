@@ -5,18 +5,16 @@ import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import https from 'node:https';
-import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { ensureDevCerts, certHosts, SERVER_CERT_DAYS, WINDOWS_HOTSPOT_IP } from '../src/devcert.js';
 import { lanAddresses, serverUrls } from '../src/network.js';
+import { freePort, cleanEnv } from './helpers.js';
 
 const appDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const KEY = 'test-key-not-real-https-123456';
-// The developer's own Qwen/tutor settings never leak into test servers.
-const cleanEnv = () => Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(QWEN_|DASHSCOPE_|TUTOR_)/.test(k)));
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'roy-https-'));
 
 // ---------- certificates ----------
@@ -65,15 +63,6 @@ test('the Windows Mobile Hotspot address is flagged in the printed URLs', () => 
 });
 
 // ---------- the real server ----------
-
-function freePort() {
-  return new Promise((resolve, reject) => {
-    const probe = net.createServer().once('error', reject).listen(0, () => {
-      const { port } = probe.address();
-      probe.close(() => resolve(port));
-    });
-  });
-}
 
 async function startHttps(extraEnv = {}) {
   const [port, setupPort] = [await freePort(), await freePort()];

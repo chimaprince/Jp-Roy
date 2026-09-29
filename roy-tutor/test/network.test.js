@@ -1,17 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import net from 'node:net';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { lanAddresses, serverUrls } from '../src/network.js';
+import { freePort, cleanEnv } from './helpers.js';
 
 const appDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-// The developer's own Qwen/tutor settings never leak into test servers.
-const cleanEnv = () => Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(QWEN_|DASHSCOPE_|TUTOR_)/.test(k)));
 
 const FAKE_INTERFACES = {
   lo: [{ address: '127.0.0.1', family: 'IPv4', internal: true }, { address: '::1', family: 'IPv6', internal: true }],
@@ -34,17 +32,6 @@ test('server URLs: localhost always; LAN URLs only when listening on all adapter
   assert.deepEqual(serverUrls({ host: '127.0.0.1', port: 3000, interfaces: FAKE_INTERFACES }).lan, []);
   assert.equal(serverUrls({ host: '0.0.0.0', port: 3443, secure: true, interfaces: FAKE_INTERFACES }).lan[0].url, 'https://192.168.1.23:3443');
 });
-
-// Starts the real server.js on a spare port and a throwaway database.
-// A port the OS says is free right now.
-function freePort() {
-  return new Promise((resolve, reject) => {
-    const probe = net.createServer().once('error', reject).listen(0, () => {
-      const { port } = probe.address();
-      probe.close(() => resolve(port));
-    });
-  });
-}
 
 async function startServer(extraEnv = {}) {
   const port = await freePort();

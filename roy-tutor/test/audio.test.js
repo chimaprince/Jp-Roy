@@ -4,7 +4,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import net from 'node:net';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -17,12 +16,11 @@ import {
 import {
   encodeWav, resample, toMono, SilenceDetector, rms, pickRecorderType, uploadType, playbackRate, STATES, BUSY_STATES, silentWav,
 } from '../public/voice-core.js';
+import { freePort, cleanEnv } from './helpers.js';
 
 const appDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const KEY = 'test-key-not-real-1234567890';
 
-// The developer's own Qwen/tutor settings never leak into test servers.
-const cleanEnv = () => Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(QWEN_|DASHSCOPE_|TUTOR_)/.test(k)));
 
 // ---------- browser helpers (recording and playback) ----------
 
@@ -348,15 +346,6 @@ test('teacher lines get audio ids; the engine result itself is not changed; fail
 });
 
 // ---------- the whole path through the real server ----------
-
-function freePort() {
-  return new Promise((resolve, reject) => {
-    const probe = net.createServer().once('error', reject).listen(0, () => {
-      const { port } = probe.address();
-      probe.close(() => resolve(port));
-    });
-  });
-}
 
 // A stand-in for Qwen: the teacher (chat), ASR (chat with audio) and TTS.
 async function startFakeQwen() {

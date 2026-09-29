@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { loadEnv } from '../src/env.js';
 import { createVoice, voiceSettings, asrProtocol, ASR_DEFAULT_MODEL } from '../src/voice.js';
 import { encodeWav } from '../public/voice-core.js';
+import { cleanEnv } from './helpers.js';
 
 const appDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const WAV = Buffer.from(encodeWav(new Float32Array(1600).fill(0.1), 16000));
@@ -19,8 +20,6 @@ const WS = 'https://ws-test123.ap-southeast-1.maas.aliyuncs.com/compatible-mode/
 const NATIVE = 'https://ws-test123.ap-southeast-1.maas.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation';
 const quiet = () => {};
 
-// The developer's own Qwen/tutor settings never leak into test servers.
-const cleanEnv = () => Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(QWEN_|DASHSCOPE_|TUTOR_)/.test(k)));
 
 function tempEnv(text, name = '.env') {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'roy-env-'));

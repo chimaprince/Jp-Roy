@@ -552,7 +552,10 @@ if (!window.isSecureContext) {
 // Both modes share Roy's curriculum position (JH Medics word 1 → 385).
 
 let learnMode = null; // null (home), 'interactive' or 'listen'
-let listenedWords = null; // latest count from the server (lessons are fetched ahead, so theirs can be stale)
+// Latest from the server's completion replies (lessons are fetched ahead, so
+// the numbers inside a lesson can be one word behind).
+let listenedWords = null;
+let latestPosition = null;
 
 function notice(text) {
   $('notice').textContent = text || '';
@@ -607,6 +610,7 @@ $('mode-listen').addEventListener('click', () => {
   leaveInteractive();
   notice('');
   showMode('listen');
+  latestPosition = null; // Interactive Practice may have moved it
   if (listenPlayer.state === 'idle') listenPlayer.open(undefined); // the server picks: review first on a new day, else the current word
   else listenPlayer.play();
 });
@@ -647,7 +651,7 @@ const listenPlayer = new ListenController({
   onComplete: async (lesson) => {
     const place = await api('POST', '/api/listen/complete', { position: lesson.position, review: Boolean(lesson.review) });
     listenedWords = place.listened;
-    Object.assign(lesson, { currentPosition: place.currentPosition, completedWords: place.completedWords });
+    latestPosition = place.currentPosition;
     renderStatus({ course: true, total: place.total, position: place.currentPosition, finished: place.finished });
     renderListen(listenPlayer.view);
   },
@@ -665,7 +669,8 @@ function renderListen(view) {
   if (lesson) {
     renderView({ card: lesson.card, stage: null });
     const what = lesson.review ? `Review ${lesson.reviewIndex + 1} of ${lesson.reviewCount} · Word ${lesson.position}` : `Word ${lesson.position} of ${lesson.total}`;
-    const place = lesson.currentPosition && lesson.currentPosition !== lesson.position && !lesson.review ? ` · your place: Word ${lesson.currentPosition}` : '';
+    const current = latestPosition ?? lesson.currentPosition;
+    const place = current && current !== lesson.position && !lesson.review ? ` · your place: Word ${current}` : '';
     const listened = Math.max(listenedWords ?? 0, lesson.listened ?? 0);
     $('listen-where').textContent = `${what}${place} · ${listened} ${listened === 1 ? 'word' : 'words'} listened`;
   }
