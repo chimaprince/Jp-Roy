@@ -20,23 +20,28 @@ const until = async (check, what, ms = 15000) => {
   }
 };
 
-// The page's audio element, simulated: play() downloads the step's audio from
-// the server, then fires 'ended' on the next tick. pause() stops it early.
+// The page's audio, simulated like public/app.js playListenStep: download the
+// step's audio from the server, then play it ('ended' follows on the next
+// tick). stopAudio() (Pause, Repeat, Next) cancels the clip in progress, and a
+// clip cancelled while it was still downloading is dropped, not played.
 function simulatedAudio(url, log) {
   let stopCurrent = null;
+  let run = 0;
   return {
     async playStep(step) {
+      const mine = run;
       const r = await fetch(`${url}/api/voice/speech/${step.audio}`);
       if (!r.ok) throw Object.assign(new Error('audio failed'), { code: 'tts_failed' });
       const bytes = Buffer.from(await r.arrayBuffer());
       assert.equal(bytes.toString('ascii', 0, 4), 'RIFF', 'real WAV audio from the server');
+      if (mine !== run) return; // cancelled while downloading
       log.push(step);
       await new Promise((resolve) => {
         const timer = setTimeout(() => { stopCurrent = null; resolve(); }, 5); // 'ended'
         stopCurrent = () => { clearTimeout(timer); resolve(); };
       });
     },
-    stopAudio() { stopCurrent?.(); stopCurrent = null; },
+    stopAudio() { run += 1; stopCurrent?.(); stopCurrent = null; },
   };
 }
 

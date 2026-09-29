@@ -245,6 +245,7 @@ export class ListenController {
     this.run = 0; // bumps to cancel whatever is in progress
     this.played = new Set(); // steps of this lesson whose audio played to the end
     this.failedSteps = 0;
+    this.completed = false; // this lesson played in full and was recorded as completed
     this.prefetched = null; // { key, promise } for the following lesson
     this.pending = undefined; // what to open when Play is pressed after a failed load
   }
@@ -261,6 +262,7 @@ export class ListenController {
       step: steps[Math.min(this.index, steps.length - 1)] ?? null,
       canNext: Boolean(this.lesson?.next),
       next: this.lesson?.next ?? null,
+      completed: this.completed,
       loadingTarget: this.state === 'loading' ? this.loadingTarget ?? null : null,
     };
   }
@@ -310,6 +312,7 @@ export class ListenController {
     this.index = 0;
     this.played = new Set();
     this.failedSteps = 0;
+    this.completed = false;
     await this.#playFrom(run);
   }
 
@@ -334,7 +337,10 @@ export class ListenController {
     this.index = this.lesson.steps.length - 1;
     const steps = this.lesson.steps.length;
     if (this.played.size === steps) {
-      try { await this.onComplete(this.lesson); } catch (err) { this.onError(err); }
+      try {
+        await this.onComplete(this.lesson);
+        this.completed = true;
+      } catch (err) { this.onError(err); }
       if (run !== this.run) return;
     } else if (this.played.size === 0) {
       // Not one step had audio: do not run silently through the curriculum.
@@ -404,13 +410,15 @@ export function listenStatusText(view) {
   switch (view.state) {
     case 'loading': return view.loadingTarget ? `Starting ${wordName(view.loadingTarget)}…` : 'Preparing the lesson…';
     case 'playing': return `Playing ${here} · ${view.index + 1} of ${view.steps}`;
-    case 'gap': return `Completed ${here}. Starting ${wordName(view.next)}…`;
+    case 'gap': return view.completed
+      ? `Completed ${here}. Starting ${wordName(view.next)}…`
+      : `${here} was not heard in full, so it is not marked complete. Starting ${wordName(view.next)}…`;
     case 'paused': return here ? `Paused at ${here}. ▶ Play to continue.` : 'Paused. ▶ Play to continue.';
-    case 'finished': return `Completed ${here}. That was the last word of JH Medics Volume 1.`;
+    case 'finished': return `${view.completed ? `Completed ${here}` : `${here} was not heard in full`}. That was the last word of JH Medics Volume 1.`;
     default: return '';
   }
 }
 
 // Version of the page code; the server reports its own (package.json). A
 // difference means an old page or an old server process: reload / restart.
-export const CLIENT_VERSION = '1.0.1';
+export const CLIENT_VERSION = '1.0.2';

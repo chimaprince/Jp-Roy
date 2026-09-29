@@ -225,10 +225,12 @@ each line is synthesised once and reused.
 
 Play is continuous: when the last line of a word's audio has finished, that word
 is recorded as completed and the next one starts by itself. The status line
-shows "Completed Word 1. Starting Word 2…". Nothing advances while a lesson is
-loading, if its audio failed, or while paused.
+shows "Completed Word 1. Starting Word 2…". Nothing is completed while a lesson
+is loading, while paused, or if any of its audio failed. Then the line says
+"Word 1 was not heard in full, so it is not marked complete. Starting Word 2…"
+and your place stays at Word 1.
 
-The page shows its version at the bottom (for example `v1.0.1`). If the page and
+The page shows its version at the bottom (for example `v1.0.2`). If the page and
 the server differ, a notice says so. Stop the server, `git pull`,
 `npm install`, start it again and reload the page.
 
@@ -291,9 +293,11 @@ servers that check every request. The tests cover:
 - **Listen & Learn:** every section for all 385 words, validated examples and
   fallback, auto-advance, Next, Repeat, Pause/Resume, network pause. Continuous
   play is also tested against the real server (`test/listen-flow.test.js`) and in
-  real Chromium (`test/browser.test.js`, which clicks Listen & Learn once and
-  expects Word 1 → 2 → 3 with no further clicks; it is skipped only if
-  Playwright is not installed).
+  real Chromium (`test/browser.test.js`). It clicks Listen & Learn once and
+  expects Word 1 → 2 → 3 with no further clicks, the real audio `ended` events
+  and the progress line following. It also covers Pause, Resume, Repeat, Next
+  and an audio failure. On a failure it prints the browser's timeline. It is
+  skipped only if Playwright is not installed.
 - **Voice:** ASR and TTS requests, server-side audio, no browser speech APIs, the
   key never reaching the browser.
 - **Phone:** HTTPS certificates, LAN binding, the setup page, the access code.

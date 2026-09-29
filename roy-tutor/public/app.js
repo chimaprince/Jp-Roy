@@ -182,18 +182,29 @@ async function fetchAudio(id) {
   return URL.createObjectURL(await res.blob());
 }
 
+// Plays one clip on the shared <audio> element. A clip only ever handles its
+// own events and pauses the element only while it still holds this clip: a
+// cancelled clip (Pause, Repeat, Next) must not stop or unhook the next one.
 function playUrl(url, rate, run) {
   return new Promise((resolve, reject) => {
-    const cancel = setInterval(() => { if (run !== speechRun) { player.pause(); finish(); } }, 150);
-    function cleanup() { clearInterval(cancel); player.onended = null; player.onerror = null; }
+    const mine = () => player.src === url;
+    const cancel = setInterval(() => { if (run !== speechRun) { if (mine()) player.pause(); finish(); } }, 150);
+    const onEnded = () => { if (mine()) finish(); };
+    const onError = () => { if (mine()) fail(Object.assign(new Error('The teacher audio could not be played.'), { code: 'tts_failed' })); };
+    function cleanup() {
+      clearInterval(cancel);
+      player.removeEventListener('ended', onEnded);
+      player.removeEventListener('error', onError);
+    }
     function finish() { cleanup(); resolve(); }
-    player.onended = finish;
-    player.onerror = () => { cleanup(); reject(Object.assign(new Error('The teacher audio could not be played.'), { code: 'tts_failed' })); };
+    function fail(err) { cleanup(); reject(err); }
+    player.addEventListener('ended', onEnded);
+    player.addEventListener('error', onError);
     player.src = url;
     player.playbackRate = rate;
     player.play().catch((err) => {
-      cleanup();
-      reject(Object.assign(new Error(err?.message || 'playback failed'), { code: err?.name === 'NotAllowedError' ? 'play-blocked' : 'tts_failed' }));
+      // (also when another clip replaced this one before it started: never counted as played)
+      fail(Object.assign(new Error(err?.message || 'playback failed'), { code: err?.name === 'NotAllowedError' ? 'play-blocked' : 'tts_failed' }));
     });
   });
 }
