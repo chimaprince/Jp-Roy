@@ -302,6 +302,47 @@ test('a failed audio line: the player stops on it, the word is not completed, Pl
   assert.equal(silent.view.index, 0);
 });
 
+test('each line is played with only the NEXT line as look-ahead (never the whole lesson or the next word)', async () => {
+  const calls = [];
+  const p = new ListenController({
+    playStep: async (step, { next }) => { calls.push([step.text, next?.text ?? null]); },
+    loadLesson: lessons(2),
+    wait: () => Promise.resolve(),
+  });
+  await p.open(undefined);
+  assert.deepEqual(calls, [['w1-1', 'w1-2'], ['w1-2', null], ['w2-1', 'w2-2'], ['w2-2', null]]);
+});
+
+test('Qwen voice rate-limited (429 after the server\'s retries): pauses on that line, says so, completes nothing; Play retries', async () => {
+  let limited = true;
+  const played = [];
+  const completed = [];
+  const errors = [];
+  const p = new ListenController({
+    playStep: async (step) => {
+      if (step.text === 'w1-2' && limited) throw Object.assign(new Error('rate limited'), { code: 'tts_rate_limited' });
+      played.push(step.text);
+    },
+    loadLesson: lessons(2),
+    onComplete: (l) => completed.push(l.position),
+    onError: (e) => errors.push(e.code),
+    wait: () => Promise.resolve(),
+  });
+  await p.open(undefined);
+  assert.equal(p.state, 'paused');
+  assert.equal(p.view.problem, 'rate_limited');
+  assert.match(listenStatusText(p.view), /rate limit.*Word 1 is paused, not complete.*▶ Play to retry/);
+  assert.deepEqual(completed, []);
+  assert.deepEqual(errors, ['tts_rate_limited']);
+  await settle();
+  assert.deepEqual(played, ['w1-1'], 'no automatic retry loop in the page');
+  limited = false;
+  p.play();
+  await settle();
+  assert.deepEqual(played, ['w1-1', 'w1-2', 'w2-1', 'w2-2']);
+  assert.deepEqual(completed, [1, 2]);
+});
+
 test('a failed save: the word is heard but not recorded, the player pauses; Play saves it and continues', async () => {
   let online = false;
   const completed = [];

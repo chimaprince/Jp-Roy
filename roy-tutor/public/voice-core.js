@@ -82,6 +82,7 @@ export const VOICE_ERRORS = {
   audio_too_large: 'That recording was too long. Keep each answer under about a minute.',
   tts_failed: "The teacher's voice (Qwen) could not be produced for this reply. Read it in the conversation below; the lesson carries on.",
   tts_expired: "The teacher's audio for this reply has expired. Read it in the conversation below.",
+  tts_rate_limited: "Qwen's voice generation is temporarily rate-limited (too many requests). The tutor waited and tried again a few times. Wait a moment, then try again.",
   'play-blocked': 'The phone blocked the teacher audio. Tap START TALKING once to allow sound, then carry on.',
 };
 
@@ -245,7 +246,7 @@ export class ListenController {
     this.run = 0; // bumps to cancel whatever is in progress
     this.played = new Set(); // steps of this lesson whose audio played to the end
     this.completed = false; // this lesson played in full and was recorded as completed
-    this.problem = null; // why it is paused: 'audio' (a line could not be played) or 'not_saved'
+    this.problem = null; // why it is paused: 'audio' (a line could not be played), 'rate_limited' or 'not_saved'
     this.prefetched = null; // { key, promise } for the following lesson
     this.pending = undefined; // what to open when Play is pressed after a failed load
   }
@@ -323,13 +324,13 @@ export class ListenController {
     this.#prefetchNext();
     while (run === this.run && this.index < this.lesson.steps.length) {
       try {
-        await this.playStep(this.lesson.steps[this.index]);
+        await this.playStep(this.lesson.steps[this.index], { next: this.lesson.steps[this.index + 1] ?? null });
         if (run === this.run) this.played.add(this.index);
       } catch (err) {
         if (run !== this.run) return;
         // A line that could not be played: stop on it, never skip it silently.
         // The word is not complete; Play tries this line again, Next skips.
-        this.problem = PAUSE_ON.has(err?.code) ? null : 'audio';
+        this.problem = PAUSE_ON.has(err?.code) ? null : err?.code === 'tts_rate_limited' ? 'rate_limited' : 'audio';
         this.pause();
         this.onError(err);
         return;
@@ -433,6 +434,7 @@ export function listenStatusText(view) {
     case 'gap': return `Completed ${here}. Starting ${wordName(view.next)}…`;
     case 'paused':
       if (view.problem === 'audio') return `${here}: this line's audio could not be played, so ${here} is not complete. ▶ Play tries again · → Next skips it.`;
+      if (view.problem === 'rate_limited') return `Qwen's voice is busy right now (rate limit), so ${here} is paused, not complete. Wait a moment, then ▶ Play to retry.`;
       if (view.problem === 'not_saved') return `${here} was heard in full but could not be saved. ▶ Play tries again.`;
       return here ? `Paused at ${here}. ▶ Play to continue.` : 'Paused. ▶ Play to continue.';
     case 'finished': return `Completed ${here}. That was the last word of JH Medics Volume 1.`;
@@ -442,4 +444,4 @@ export function listenStatusText(view) {
 
 // Version of the page code; the server reports its own (package.json). A
 // difference means an old page or an old server process: reload / restart.
-export const CLIENT_VERSION = '1.0.3';
+export const CLIENT_VERSION = '1.0.4';

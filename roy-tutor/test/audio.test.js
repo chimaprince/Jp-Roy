@@ -9,8 +9,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
 import {
-  createVoice, voiceSettings, SpeechStore, parseAsrReply, parseTtsReply, asrLanguage, ttsLanguage, audioMime,
+  createVoice, voiceSettings, SpeechStore, VoiceError, parseAsrReply, parseTtsReply, asrLanguage, ttsLanguage, audioMime,
   ASR_DEFAULT_MODEL, ASR_DEFAULT_BASE_URL, TTS_DEFAULT_MODEL, TTS_DEFAULT_URL, TTS_DEFAULT_INSTRUCTIONS_ZH, TTS_DEFAULT_INSTRUCTIONS_EN, audioInfo, asrEndpointProblem, asrContext, asrProtocol, asrEndpoint,
 } from '../src/voice.js';
 import {
@@ -331,14 +332,14 @@ test('TTS failures are reported as tts_failed, with Qwen\'s HTTP status (e.g. 40
 test('teacher lines get audio ids; the engine result itself is not changed; failures are caught', async () => {
   const said = [];
   const voice = { configured: true, async synthesize(text) { said.push(text); if (text === 'boom') throw new Error('tts down'); return { audio: WAV, mime: 'audio/wav' }; } };
-  const store = new SpeechStore(voice, { log: quiet });
+  const store = new SpeechStore(voice, { log: quiet, minGapMs: 0 });
   const result = { say: [{ lang: 'en', text: 'Say it: 硬膜外' }, { lang: 'zh', text: 'boom' }, { lang: 'en', text: '' }], listen: 'zh-CN' };
   const out = store.attach(result);
   assert.equal(result.say[0].audio, undefined, 'the engine result is not mutated');
   assert.ok(out.say[0].audio && out.say[1].audio && out.say[0].audio !== out.say[1].audio);
   assert.equal(out.say[2].audio, undefined, 'blank lines are not synthesised');
   assert.equal(out.listen, 'zh-CN');
-  assert.deepEqual(said, ['Say it: 硬膜外', 'boom']);
+  assert.deepEqual(said, [], 'ids only: nothing is synthesised until the page asks for a line');
   assert.deepEqual((await store.get(out.say[0].audio)).audio, WAV);
   await assert.rejects(store.get(out.say[1].audio), /tts down/);
   assert.equal(store.get('nope'), null);
@@ -349,7 +350,7 @@ test('a line whose TTS failed is synthesised again when its audio is asked for a
   let down = true;
   let calls = 0;
   const voice = { configured: true, async synthesize() { calls += 1; if (down) throw new Error('tts down'); return { audio: WAV, mime: 'audio/wav' }; } };
-  const store = new SpeechStore(voice, { log: quiet });
+  const store = new SpeechStore(voice, { log: quiet, minGapMs: 0 });
   const id = store.attachTo({ steps: [{ lang: 'zh', text: '硬膜外' }] }, 'steps').steps[0].audio;
   await assert.rejects(store.get(id), /tts down/);
   await assert.rejects(store.get(id), /tts down/, 'still down: fails again, honestly');
@@ -359,6 +360,147 @@ test('a line whose TTS failed is synthesised again when its audio is asked for a
   assert.equal(calls, 3);
   await store.get(id);
   assert.equal(calls, 3, 'a line that worked is not synthesised again');
+});
+
+// ---------- the TTS queue: one request at a time, cache, dedup, 429 backoff ----------
+
+// A stand-in voice that counts calls and how many are in flight at once.
+function countingVoice({ delayMs = 5, fail = () => null } = {}) {
+  const v = {
+    configured: true, calls: [], inFlight: 0, peak: 0,
+    ttsKey: (text) => createHash('sha256').update(`Cherry|${text}`).digest('hex'),
+    async synthesize(text) {
+      v.calls.push(text);
+      v.inFlight += 1;
+      v.peak = Math.max(v.peak, v.inFlight);
+      await new Promise((r) => setTimeout(r, delayMs));
+      v.inFlight -= 1;
+      const err = fail(text, v.calls.length);
+      if (err) throw err;
+      return { audio: Buffer.concat([WAV, Buffer.from(text)]), mime: 'audio/wav' };
+    },
+  };
+  return v;
+}
+const rateLimited = () => new VoiceError('tts_failed', 'Qwen speech synthesis failed (status 429).', { httpStatus: 429, detail: '{"code":"Throttling.RateQuota","message":"Requests rate limit exceeded"}' });
+const lessonOf = (store, texts) => store.attachTo({ steps: texts.map((text) => ({ lang: 'zh', text })) }, 'steps').steps.map((s) => s.audio);
+
+test('TTS queue: a lesson gets ids only; asking for every line at once still sends ONE Qwen request at a time, in order', async () => {
+  const voice = countingVoice();
+  const store = new SpeechStore(voice, { log: quiet, minGapMs: 0 });
+  const texts = Array.from({ length: 14 }, (_, i) => `第${i + 1}句`);
+  const ids = lessonOf(store, texts);
+  assert.equal(voice.calls.length, 0, 'building the lesson sends nothing to Qwen');
+  const all = await Promise.all(ids.map((id) => store.get(id)));
+  assert.equal(voice.calls.length, 14);
+  assert.equal(voice.peak, 1, 'never more than one Qwen TTS request in flight');
+  assert.deepEqual(voice.calls, texts, 'in the order asked');
+  assert.ok(all.every((a, i) => a.audio.includes(Buffer.from(texts[i]))));
+});
+
+test('TTS dedup: the same line asked for three times at once (and under three ids) is ONE Qwen request', async () => {
+  const voice = countingVoice({ delayMs: 20 });
+  const store = new SpeechStore(voice, { log: quiet, minGapMs: 0 });
+  const [a] = lessonOf(store, ['硬膜外']);
+  const [b, c] = lessonOf(store, ['硬膜外', '硬膜外']);
+  const got = await Promise.all([store.get(a), store.get(a), store.get(a), store.get(b), store.get(c)]);
+  assert.equal(voice.calls.length, 1, 'one request');
+  assert.ok(got.every((g) => g.audio.equals(got[0].audio)), 'every caller got the same audio');
+});
+
+test('TTS cache: a line said before is not requested again (Repeat, a new lesson, a restarted server via the disk cache)', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'roy-ttscache-'));
+  const voice = countingVoice();
+  const store = new SpeechStore(voice, { log: quiet, minGapMs: 0, cacheDir: dir });
+  const [id] = lessonOf(store, ['我们需要给你做硬膜外麻醉。']);
+  const first = await store.get(id);
+  await store.get(id); // Repeat: same id
+  const [again] = lessonOf(store, ['我们需要给你做硬膜外麻醉。']); // the same line in a later lesson
+  await store.get(again);
+  assert.equal(voice.calls.length, 1);
+  await new Promise((r) => setTimeout(r, 50)); // the disk write
+  assert.equal(fs.readdirSync(dir).length, 1, 'saved to the disk cache');
+  const restarted = countingVoice();
+  const store2 = new SpeechStore(restarted, { log: quiet, minGapMs: 0, cacheDir: dir });
+  const [id2] = lessonOf(store2, ['我们需要给你做硬膜外麻醉。']);
+  assert.ok((await store2.get(id2)).audio.equals(first.audio));
+  assert.equal(restarted.calls.length, 0, 'after a restart the disk cache answers');
+});
+
+test('TTS cache key: stable, and changes with the text, voice or model; it never contains the API key', () => {
+  const env = { DASHSCOPE_API_KEY: KEY };
+  const v = createVoice({ env, log: quiet });
+  assert.equal(v.ttsKey('硬膜外'), v.ttsKey('硬膜外'));
+  assert.equal(v.ttsKey(' 硬膜外 '), v.ttsKey('硬膜外'), 'same spoken text');
+  assert.notEqual(v.ttsKey('硬膜外'), v.ttsKey('硬膜外麻醉'));
+  assert.notEqual(v.ttsKey('硬膜外'), createVoice({ env: { ...env, QWEN_TTS_VOICE: 'Ethan' }, log: quiet }).ttsKey('硬膜外'));
+  assert.notEqual(v.ttsKey('硬膜外'), createVoice({ env: { ...env, QWEN_TTS_MODEL: 'other-tts' }, log: quiet }).ttsKey('硬膜外'));
+  assert.match(v.ttsKey('硬膜外'), /^[0-9a-f]{64}$/);
+  assert.ok(!v.ttsKey('硬膜外').includes(KEY));
+});
+
+test('TTS 429: waits and retries a few times, one at a time; a later success returns the audio', async () => {
+  const voice = countingVoice({ fail: (text, n) => (n <= 2 ? rateLimited() : null) });
+  const logs = [];
+  const store = new SpeechStore(voice, { log: (m) => logs.push(m), minGapMs: 0, retryDelays: [30, 60, 120] });
+  const [id, other] = lessonOf(store, ['硬膜外', '外']);
+  const t = Date.now();
+  const [got] = await Promise.all([store.get(id), store.get(other)]);
+  assert.ok(got.audio.includes(Buffer.from('硬膜外')), 'the retry returned the audio');
+  assert.deepEqual(voice.calls, ['硬膜外', '硬膜外', '硬膜外', '外'], 'two 429s, then success; the other line waited its turn');
+  assert.equal(voice.peak, 1, 'retries are never sent in parallel');
+  assert.ok(Date.now() - t >= 90, 'it backed off (30 + 60 ms) before retrying');
+  assert.equal(logs.filter((l) => /rate-limited \(429\)/.test(l)).length, 2);
+});
+
+test('TTS 429 that does not clear: stops after the last retry with a clear "rate-limited" error (no endless loop)', async () => {
+  const voice = countingVoice({ fail: () => rateLimited() });
+  const store = new SpeechStore(voice, { log: quiet, minGapMs: 0, retryDelays: [10, 20, 30] });
+  const [id] = lessonOf(store, ['硬膜外']);
+  await assert.rejects(store.get(id), (e) => e.code === 'tts_rate_limited' && e.status === 503 && /rate-limited/.test(e.message));
+  assert.equal(voice.calls.length, 4, 'the first try plus 3 retries, then it stops');
+  await new Promise((r) => setTimeout(r, 100));
+  assert.equal(voice.calls.length, 4, 'nothing keeps retrying in the background');
+  // Asking again later (the page's ▶ Play) is a new, single attempt series.
+  const recovered = countingVoice();
+  store.voice = recovered;
+  assert.ok((await store.get(id)).audio.length > 0);
+  assert.equal(recovered.calls.length, 1);
+});
+
+test('TTS minimum gap: requests are spaced out', async () => {
+  const voice = countingVoice({ delayMs: 1 });
+  const store = new SpeechStore(voice, { log: quiet, minGapMs: 40 });
+  const ids = lessonOf(store, ['一', '二', '三']);
+  const t = Date.now();
+  await Promise.all(ids.map((id) => store.get(id)));
+  assert.ok(Date.now() - t >= 80, 'three requests at least 40 ms apart');
+});
+
+test('TTS cancel: a queued line nobody waits for any more (Next / Pause) is dropped before it is sent to Qwen', async () => {
+  const voice = countingVoice({ delayMs: 30 });
+  const store = new SpeechStore(voice, { log: quiet, minGapMs: 0 });
+  const [w1, w1b, w2] = lessonOf(store, ['Word 1 line', 'Word 1 next line', 'Word 2 line']);
+  const stale = new AbortController();
+  const playing = store.get(w1); // being generated
+  const lookahead = store.get(w1b, { signal: stale.signal }); // queued behind it
+  lookahead.catch(() => {});
+  stale.abort(); // the page pressed Next
+  await assert.rejects(lookahead, (e) => e.code === 'tts_cancelled');
+  await playing;
+  await store.get(w2);
+  assert.deepEqual(voice.calls, ['Word 1 line', 'Word 2 line'], 'the abandoned line was never sent');
+  // Shared: one caller leaving does not cancel it for another still waiting.
+  const [shared] = lessonOf(store, ['shared line']);
+  const leaving = new AbortController();
+  const blocker = store.get(lessonOf(store, ['busy'])[0]);
+  const p1 = store.get(shared, { signal: leaving.signal });
+  p1.catch(() => {});
+  const p2 = store.get(shared);
+  leaving.abort();
+  await blocker;
+  assert.ok((await p2).audio.length > 0);
+  assert.ok(voice.calls.includes('shared line'));
 });
 
 // ---------- the whole path through the real server ----------
@@ -552,7 +694,7 @@ test('ASR failure: clear error, nothing reaches the engine, and a retry of the s
 
 test('TTS failure: the teacher text still arrives and the lesson continues', async () => {
   const qwen = await startFakeQwen();
-  qwen.control.ttsStatus = 429;
+  qwen.control.ttsStatus = 500; // 429 (rate limit) has its own tests
   const s = await startTutor(qwen.port);
   try {
     const start = await (await postJson(`${s.url}/api/session/start`)).json();

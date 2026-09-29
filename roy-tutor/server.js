@@ -55,10 +55,21 @@ if (teacher.configured) {
   console.error('  The tutor will not run lessons until it is set. There is no scripted fallback.');
 }
 const voice = createVoice();
-const speech = new SpeechStore(voice);
+// Teacher audio: synthesised only when the page asks for a line, one Qwen TTS
+// request at a time, cached (memory + disk, next to the database) so a line said
+// before is never requested again; 429 is retried a few times with backoff.
+const audioCache = process.env.TUTOR_AUDIO_CACHE === 'off' ? null
+  : path.resolve(process.env.TUTOR_AUDIO_CACHE || path.join(path.dirname(path.resolve(process.env.TUTOR_DB || path.join(here, 'tutor.db'))), 'audio-cache'));
+const retryDelays = (process.env.QWEN_TTS_RETRY_MS || '').split(',').map((v) => Number(v.trim())).filter((v) => Number.isFinite(v) && v >= 0);
+const speech = new SpeechStore(voice, {
+  cacheDir: audioCache,
+  ...(retryDelays.length ? { retryDelays } : {}),
+  ...(process.env.QWEN_TTS_MIN_GAP_MS ? { minGapMs: Number(process.env.QWEN_TTS_MIN_GAP_MS) || 0 } : {}),
+});
 console.log(`speech recognition: Qwen ${voice.asrModel} (QWEN_ASR_MODEL from ${envSource('QWEN_ASR_MODEL')}), ${voice.asrProtocol === 'native' ? 'native DashScope' : 'OpenAI-compatible'} API at ${voice.asrURL}`);
 if (asrEndpointProblem(voice.asrURL)) console.error(`  ${asrEndpointProblem(voice.asrURL)}`);
 console.log(`teacher voice: Qwen ${voice.ttsModel} (voice ${voice.ttsVoice}) at ${voice.ttsURL}`);
+console.log(`teacher voice requests: one at a time, 429 retried after ${speech.retryDelays.join(' / ')} ms; audio cache: ${audioCache ?? 'off'}`);
 const tutor = new Tutor({ db, teacher, userId: process.env.TUTOR_USER_ID || 'roy', userName: process.env.TUTOR_USER_NAME || 'Roy' });
 
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml' };
@@ -216,7 +227,11 @@ async function audioRoute(req, res, url) {
   }
   const m = req.method === 'GET' && url.pathname.match(/^\/api\/voice\/speech\/([a-z0-9]{1,40})$/);
   if (m) {
-    const job = speech.get(m[1]);
+    // If the page gives up on this line (Next, Pause, a new lesson), a request
+    // still waiting in the TTS queue is dropped instead of being sent to Qwen.
+    const gone = new AbortController();
+    res.on('close', () => { if (!res.writableEnded) gone.abort(); });
+    const job = speech.get(m[1], { signal: gone.signal });
     if (!job) return send(res, 404, { error: 'That audio has expired.', code: 'tts_expired' });
     const { audio, mime } = await job;
     res.writeHead(200, { 'Content-Type': mime, 'Content-Length': audio.length, 'Cache-Control': 'no-store', ...SECURITY_HEADERS });
@@ -253,6 +268,7 @@ async function handler(req, res) {
     send(res, 200, await serial(() => route(body)));
   } catch (err) {
     if (err instanceof VoiceError) {
+      if (err.code === 'tts_cancelled') return; // the page left; nobody to answer
       // Qwen's own error text stays in the server log.
       console.error(`[voice] ${err.code}: ${err.message}${err.detail ? ` ${err.detail}` : ''}`);
       if (err.status === 413) req.resume();

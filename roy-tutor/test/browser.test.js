@@ -66,7 +66,13 @@ function recorder() {
   HTMLMediaElement.prototype.play = function play(...args) {
     if (!this.observed) {
       this.observed = true;
-      for (const e of ['playing', 'ended', 'error']) this.addEventListener(e, () => note('audio', e));
+      for (const e of ['playing', 'ended', 'error']) {
+        this.addEventListener(e, () => {
+          note('audio', e);
+          // Which Listen & Learn line was on screen when this clip played.
+          if (e === 'playing') note('clip', `${document.getElementById('listen-state')?.textContent ?? ''} | ${document.getElementById('listen-now')?.textContent ?? ''}`);
+        });
+      }
     }
     return originalPlay.apply(this, args);
   };
@@ -188,75 +194,158 @@ test('browser: Listen & Learn plays Word 1 → Word 2 → Word 3 by itself (no N
       assert.ok(!(await p.texts('state')).some((t) => /Finished this word|→ Next for the next word/.test(t)), 'the old "press Next" message never shows');
       assert.ok(p.requests.some((r) => r.url === '/api/listen?position=2') && p.requests.some((r) => r.url === '/api/listen?position=3'), 'the next lessons were requested');
       assert.ok(q.seen.tts > 0, 'the audio came from the Qwen TTS stand-in');
+
+      // Qwen TTS load: lines are requested one at a time as they are played
+      // (plus one line of look-ahead), each distinct line exactly once.
+      const lines = async (n) => (await (await fetch(`${s.url}/api/listen?audio=0&position=${n}`)).json()).steps.map((x) => x.text);
+      const w12 = new Set([...(await lines(1)), ...(await lines(2))]);
+      await p.page.waitForTimeout(300); // let a look-ahead request that is still on its way land
+      assert.equal(q.seen.ttsPeak, 1, 'never more than one Qwen TTS request at a time');
+      assert.equal(new Set(q.seen.ttsText).size, q.seen.ttsText.length, `no line was generated twice: ${q.seen.ttsText.join(' | ')}`);
+      assert.ok([...w12].every((t) => q.seen.ttsText.includes(t)), 'every line of Words 1 and 2 was generated');
+      assert.ok(q.seen.tts <= w12.size + 2, `3 words played → ${q.seen.tts} TTS requests (Words 1-2 have ${w12.size} distinct lines; Word 3 had just started)`);
     } finally {
       await p.page.close();
     }
-  });
+  }, { ttsDelayMs: 60 });
 });
 
-test('browser: Pause does not advance; Play resumes and continues to the next word', { skip }, async () => {
-  await withServer(async (s) => {
+const speechRequests = (p) => p.requests.filter((r) => r.url.startsWith('/api/voice/speech/')).map((r) => r.url);
+
+test('browser: Pause does not advance or request audio; Play resumes the same line from the audio it already has', { skip }, async () => {
+  await withServer(async (s, q) => {
     const p = await openPage(s.url);
     try {
       await p.page.click('#mode-listen');
-      await p.waitFor('Word 1 step 3', state(/^Playing Word 1 · 3 of \d+$/));
+      const step3 = await p.waitFor('Word 1 step 3', state(/^Playing Word 1 · 3 of \d+$/));
+      await p.waitFor('its audio playing', (e) => e.kind === 'audio' && e.text === 'playing' && e.t > step3.t);
       await p.page.click('#listen-pause');
       await p.waitFor('paused', state(/^Paused at Word 1\./));
+      await p.page.waitForTimeout(400); // a look-ahead already sent may land
+      const qwenAtPause = q.seen.tts;
+      const downloadsAtPause = speechRequests(p).length;
       await p.page.waitForTimeout(3000); // longer than a whole word would take
       const after = (await p.timeline()).filter((e) => e.kind === 'state').at(-1).text;
       assert.match(after, /^Paused at Word 1\./, 'still paused at Word 1');
       assert.equal(p.completes().length, 0, 'nothing completed while paused');
       assert.equal(await place(s.url), 1);
+      assert.equal(q.seen.tts, qwenAtPause, 'no Qwen TTS request while paused');
 
+      const resume = Date.now();
       await p.page.click('#listen-play');
-      await p.waitFor('Word 1 resumed', (e) => e.kind === 'state' && /^Playing Word 1 · [3-9]/.test(e.text) && e.t > 0);
+      const resumed = await p.waitFor('Word 1 resumed at step 3', (e) => e.kind === 'state' && e.text.startsWith('Playing Word 1 · 3 of') && e.t > step3.t + 100);
+      await p.waitFor('its audio plays again', (e) => e.kind === 'audio' && e.text === 'playing' && e.t > resumed.t);
+      assert.equal(speechRequests(p).length, downloadsAtPause, 'the interrupted line replays from the audio the page already had');
+      assert.equal(q.seen.tts, qwenAtPause, 'and Qwen is not asked again');
+      assert.ok(Date.now() - resume < 5000);
       await p.waitFor('then Word 2 by itself', state(/^Playing Word 2 · 1 of/));
       await p.page.click('#listen-pause');
       assert.deepEqual(p.completes(), [{ position: 1, review: false }]);
       assert.equal(await place(s.url), 2);
+      assert.equal(new Set(q.seen.ttsText).size, q.seen.ttsText.length, 'no line generated twice');
     } finally {
       await p.page.close();
     }
   });
 });
 
-test('browser: Repeat replays the current word and does not advance', { skip }, async () => {
-  await withServer(async (s) => {
+test('browser: Repeat replays the current word from cached audio and does not advance', { skip }, async () => {
+  await withServer(async (s, q) => {
     const p = await openPage(s.url);
     try {
       await p.page.click('#mode-listen');
       const mid = await p.waitFor('Word 1 step 4', state(/^Playing Word 1 · 4 of \d+$/));
+      await p.waitFor('its audio playing', (e) => e.kind === 'audio' && e.text === 'playing' && e.t > mid.t);
+      const heard = speechRequests(p);
+      const qwenBefore = q.seen.tts;
       await p.page.click('#listen-repeat');
       const again = await p.waitFor('Word 1 from its first step again', (e) => e.kind === 'state' && /^Playing Word 1 · 1 of/.test(e.text) && e.t > mid.t);
       assert.equal(p.completes().length, 0, 'Repeat did not complete Word 1');
       assert.equal(await place(s.url), 1, 'Repeat did not move the place');
       const between = (await p.timeline()).filter((e) => e.kind === 'state' && e.t > mid.t && e.t <= again.t).map((e) => e.text);
       assert.ok(!between.some((t) => /Word 2/.test(t)), `no Word 2 before the replay: ${between}`);
+      const replayed = await p.waitFor('the replay reaches step 4 again', (e) => e.kind === 'state' && e.t > again.t && e.text.startsWith('Playing Word 1 · 4 of'));
+      await p.waitFor('its audio playing', (e) => e.kind === 'audio' && e.text === 'playing' && e.t > replayed.t);
+      assert.deepEqual(speechRequests(p).slice(0, heard.length), heard);
+      assert.equal(speechRequests(p).filter((u) => heard.includes(u)).length, heard.length, 'lines 1-4 were not downloaded again');
+      assert.ok(q.seen.tts <= qwenBefore + 1, 'and not generated again (at most the next new line was asked for)');
       // After the replay finishes, it goes on as usual.
       await p.waitFor('then Word 2', state(/^Playing Word 2 · 1 of/));
       await p.page.click('#listen-pause');
       assert.deepEqual(p.completes(), [{ position: 1, review: false }]);
+      assert.equal(new Set(q.seen.ttsText).size, q.seen.ttsText.length, 'no line generated twice');
     } finally {
       await p.page.close();
     }
   });
 });
 
-test('browser: Next skips to the next word at once (the skipped word is not completed)', { skip }, async () => {
-  await withServer(async (s) => {
+test('browser: Next skips at once; Word 1 audio still being generated never plays over Word 2 (stale request)', { skip }, async () => {
+  await withServer(async (s, q) => {
     const p = await openPage(s.url);
     try {
+      // Slow voice (400 ms per line): press Next the moment Word 1's third line
+      // starts, while its audio is still being generated.
+      await p.page.evaluate(() => {
+        const el = document.getElementById('listen-state');
+        const obs = new MutationObserver(() => {
+          if (/^Playing Word 1 · 3 of/.test(el.textContent)) { obs.disconnect(); window.nextAt = performance.now(); document.getElementById('listen-next').click(); }
+        });
+        obs.observe(el, { childList: true, characterData: true, subtree: true });
+      });
       await p.page.click('#mode-listen');
-      await p.waitFor('Word 1 step 2', state(/^Playing Word 1 · 2 of \d+$/));
-      await p.page.click('#listen-next');
-      await p.waitFor('Word 2 after Next', state(/^Playing Word 2 · 1 of/));
+      const line = await p.waitFor('Word 1 step 3', state(/^Playing Word 1 · 3 of \d+$/));
+      const click = (await p.waitFor('the Next click', (e) => e.kind === 'click' && e.text === 'listen-next')).t;
+      assert.ok(click - line.t < 50, 'Next was pressed as the line started');
+      assert.ok(!(await p.timeline()).some((e) => e.kind === 'clip' && e.t >= line.t && e.t <= click), 'its audio had not started yet');
+      await p.waitFor('Word 2 after Next', (e) => e.kind === 'state' && e.t > click && /^Playing Word 2 · 1 of/.test(e.text));
+      const w2Audio = await p.waitFor('Word 2 audio playing', (e) => e.kind === 'clip' && e.t > click);
+      await p.page.waitForTimeout(1200); // the stale Word 1 audio has certainly arrived by now
       await p.page.click('#listen-pause');
+      const clips = (await p.timeline()).filter((e) => e.kind === 'clip' && e.t > click);
+      assert.ok(clips.every((c) => /Word 2/.test(c.text)), `only Word 2 audio played after Next: ${clips.map((c) => c.text).join(' | ')}`);
+      assert.match(w2Audio.text, /^Playing Word 2 · 1 of/);
       assert.equal(p.completes().length, 0, 'the skipped Word 1 was not completed');
       assert.equal(await place(s.url), 1, 'the place stays at the skipped word');
+      assert.equal(q.seen.ttsPeak, 1, 'one Qwen TTS request at a time throughout');
+      assert.equal(new Set(q.seen.ttsText).size, q.seen.ttsText.length, 'no line generated twice');
     } finally {
       await p.page.close();
     }
-  });
+  }, { ttsDelayMs: 400 });
+});
+
+test('browser: Qwen TTS 429 (rate limit): the server backs off and retries one at a time, then the page pauses with a clear message; ▶ Play retries and it carries on', { skip }, async () => {
+  let limited = true;
+  const target = 'In English: epidural.'; // Word 1's English line
+  // Qwen answers 429 for that line while `limited` is on.
+  await withServer(async (s, q) => {
+    const p = await openPage(s.url);
+    try {
+      await p.page.click('#mode-listen');
+      const stopped = await p.waitFor('the rate-limit pause', state(/^Qwen's voice is busy right now \(rate limit\), so Word 1 is paused, not complete\. Wait a moment, then ▶ Play to retry\.$/));
+      assert.match(await p.page.textContent('#notice'), /temporarily rate-limited/);
+      const tries = q.seen.ttsText.filter((t) => t === target).length;
+      assert.equal(tries, 4, 'the first request plus 3 spaced retries, then it stopped');
+      assert.equal(q.seen.ttsPeak, 1, 'retries were never sent in parallel');
+      await p.page.waitForTimeout(1000);
+      assert.equal(q.seen.ttsText.filter((t) => t === target).length, 4, 'no retry loop in the background');
+      assert.deepEqual((await p.timeline()).filter((e) => e.kind === 'state' && e.t > stopped.t), [], 'nothing moved on');
+      assert.equal(p.completes().length, 0, 'Word 1 was not completed');
+      assert.equal(await place(s.url), 1);
+
+      limited = false; // the rate limit has cleared
+      await p.page.click('#listen-play');
+      await p.waitFor('Word 1 completed after the retry', state(/^Completed Word 1\. Starting Word 2…$/));
+      await p.waitFor('then Word 2 by itself', state(/^Playing Word 2 · 1 of/));
+      await p.page.click('#listen-pause');
+      assert.equal(q.seen.ttsText.filter((t) => t === target).length, 5, 'one more request for that line after Play');
+      assert.deepEqual(p.completes(), [{ position: 1, review: false }]);
+      assert.equal(await place(s.url), 2);
+    } finally {
+      await p.page.close();
+    }
+  }, { ttsFail: (text) => limited && text === target });
 });
 
 test('browser: an audio failure stops on that line with a clear error, does not complete the word, and ▶ Play retries it', { skip }, async () => {
@@ -398,6 +487,9 @@ test('browser: Interactive Practice by voice: microphone → server → Qwen ASR
       // The reply is spoken (Qwen TTS) and played, then the page listens again.
       await p.waitFor('the reply played and the page listens again', (e) => e.kind === 'mic' && /^LISTENING/.test(e.text) && e.t > listening.t);
       assert.ok(q.seen.ttsText.includes("I didn't quite catch that. Listen once more:"), 'the reply went to Qwen TTS');
+      // One teacher reply → one TTS request per line; 硬膜外 (said in both replies) came from the cache.
+      assert.deepEqual([...q.seen.ttsText].sort(), ['Word 1 is epidural.', '硬膜外', 'Say it after me.', "I didn't quite catch that. Listen once more:", 'Say it again.'].sort());
+      assert.equal(q.seen.ttsPeak, 1, 'one Qwen TTS request at a time');
       assert.deepEqual(await p.texts('forbidden'), [], 'no SpeechRecognition / speechSynthesis in the browser');
       assert.ok(!p.bodies.some((b) => b.includes('test-key-flow')), 'the API key never reached the browser');
       assert.equal(await place(s.url), 1, 'an uncertain answer does not complete anything');

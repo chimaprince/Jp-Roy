@@ -177,9 +177,43 @@ function unlockAudio() {
   audioContext()?.resume?.().catch(() => {});
 }
 
-async function fetchAudio(id) {
-  const res = await request(`/api/voice/speech/${encodeURIComponent(id)}`);
+async function fetchAudio(id, signal) {
+  const res = await request(`/api/voice/speech/${encodeURIComponent(id)}`, { signal });
   return URL.createObjectURL(await res.blob());
+}
+
+// Teacher audio downloaded from the server, by line id. Each line is fetched
+// once (Repeat and Resume replay it from here). stopSpeaking() cancels the
+// downloads still waiting, so the server drops their queued Qwen requests.
+const clips = new Map(); // audio id -> { promise (blob URL), url }
+const CLIP_LIMIT = 40;
+let clipAbort = new AbortController();
+
+function clip(id) {
+  const had = clips.get(id);
+  if (had) {
+    clips.delete(id);
+    // A failed download is handed out once (to the line that plays it, so the
+    // player stops on it) and then forgotten: only ▶ Play fetches it again.
+    if (!had.failed) clips.set(id, had);
+    return had.promise;
+  }
+  const c = { url: null, failed: false };
+  c.promise = fetchAudio(id, clipAbort.signal).then((url) => { c.url = url; return url; });
+  c.promise.catch(() => { c.failed = true; });
+  clips.set(id, c);
+  while (clips.size > CLIP_LIMIT) {
+    const [oldId, old] = clips.entries().next().value;
+    clips.delete(oldId);
+    if (old.url) URL.revokeObjectURL(old.url);
+  }
+  return c.promise;
+}
+
+function cancelClipDownloads() {
+  clipAbort.abort();
+  clipAbort = new AbortController();
+  for (const [id, c] of clips) if (!c.url) clips.delete(id);
 }
 
 // Plays one clip on the shared <audio> element. A clip only ever handles its
@@ -222,8 +256,9 @@ async function speakAll(segments) {
   }
   setState('preparing');
   setStatus("Preparing the teacher's voice (Qwen)…");
-  // The server is already producing every line: fetch them all, play in order.
-  const jobs = lines.map((s) => fetchAudio(s.audio).then((url) => ({ url }), (err) => ({ err })));
+  // Ask for every line now; the server's TTS queue generates them one at a time
+  // (each line once, cached), and they play in order as they arrive.
+  const jobs = lines.map((s) => clip(s.audio).then((url) => ({ url }), (err) => ({ err })));
   let failed = null;
   for (let i = 0; i < lines.length; i += 1) {
     const got = await jobs[i];
@@ -244,7 +279,6 @@ async function speakAll(segments) {
       if (err.code === 'play-blocked') break;
     }
   }
-  Promise.all(jobs).then((all) => all.forEach((r) => r.url && URL.revokeObjectURL(r.url)));
   if (failed) {
     console.error('[voice] teacher audio failed:', failed);
     addLog('note', friendlyError(failed));
@@ -255,6 +289,7 @@ async function speakAll(segments) {
 
 function stopSpeaking() {
   speechRun += 1;
+  cancelClipDownloads();
   if (!player.paused) player.pause();
 }
 
@@ -633,20 +668,20 @@ $('mode-listen').addEventListener('click', () => {
 
 // ---------- Listen & Learn: Qwen TTS lessons, no microphone ----------
 
-// One step: fetch its Qwen audio from the server and play it to its 'ended'
-// event. If the audio cannot be fetched or played, the error goes to the
-// player, which stops on this line (its text stays on screen), does not mark
-// the word as listened, and retries the line on ▶ Play.
-async function playListenStep(step) {
+// One step: get its Qwen audio from the server (once; Repeat and Resume reuse
+// it) and play it to its 'ended' event. While it plays, only the NEXT line is
+// fetched, so the server's TTS queue works one line ahead at most. If the audio
+// cannot be fetched or played, the error goes to the player, which stops on
+// this line (its text stays on screen), does not mark the word as listened,
+// and retries the line on ▶ Play. Audio arriving after Pause, Repeat or Next
+// (a stale request) is never played.
+async function playListenStep(step, { next = null } = {}) {
   const run = speechRun;
   if (!step.audio) throw Object.assign(new Error('No teacher audio for this line.'), { code: 'tts_failed' });
-  const url = await fetchAudio(step.audio);
-  if (run !== speechRun) { URL.revokeObjectURL(url); return; } // paused while the audio was loading
-  try {
-    await playUrl(url, playbackRate(step), run);
-  } finally {
-    URL.revokeObjectURL(url);
-  }
+  const url = await clip(step.audio);
+  if (run !== speechRun) return; // stale: the player has moved on
+  if (next?.audio) clip(next.audio).catch(() => {}); // one line ahead
+  await playUrl(url, playbackRate(step), run);
 }
 
 const listenPlayer = new ListenController({
@@ -667,6 +702,7 @@ const listenPlayer = new ListenController({
     console.error('[listen]', err);
     if (err?.code === 'play-blocked') notice(VOICE_ERRORS['play-blocked']);
     else if (err?.code === 'network' || err?.name === 'TypeError') notice("Can't reach the tutor server (network). Listening is paused; press ▶ Play when you are connected again.");
+    else if (err?.code === 'tts_rate_limited') notice("Qwen's voice generation is temporarily rate-limited (too many requests). Listening is paused and nothing was marked complete. Wait a moment, then press ▶ Play to retry.");
     else if (err?.code === 'tts_failed' && listenPlayer.state === 'paused') notice("The teacher's voice (Qwen) is not available right now. Listening is paused; press ▶ Play to try again.");
     else if (err?.code !== 'tts_failed') notice(friendlyError(err));
   },

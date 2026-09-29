@@ -83,6 +83,8 @@ TUTOR_TIMEZONE=<e.g. Asia/Singapore>
 | `QWEN_ASR_CONTEXT` | Default on: the current term and a medical-Chinese note are sent as recognition context. `off` to disable. |
 | `QWEN_TTS_MODEL`, `QWEN_TTS_URL`, `QWEN_TTS_VOICE` | The teacher's voice. Defaults `qwen3-tts-instruct-flash`, the Singapore endpoint, `Cherry`. |
 | `QWEN_TTS_INSTRUCTIONS`, `QWEN_TTS_INSTRUCTIONS_EN` | Speaking style for Mandarin / English lines. Default: standard Putonghua, clear tones, slightly slow, a patient medical teacher. |
+| `QWEN_TTS_MIN_GAP_MS`, `QWEN_TTS_RETRY_MS` | TTS pacing: minimum gap between requests (default `250`) and the waits before retrying a 429 (default `1000,3000,8000`). |
+| `TUTOR_AUDIO_CACHE` | Folder for the teacher-audio cache (default `audio-cache/` next to the database), or `off`. |
 | `TUTOR_ACCESS_CODE` | Passcode for every API route (lessons, voice, Listen & Learn). The page asks for it once. Set it so others on the same network cannot use your Qwen quota. |
 | `TUTOR_TIMEZONE` | Decides when a new study day starts (and so the review). |
 | `TUTOR_DB` | SQLite file, default `roy-tutor/tutor.db`. |
@@ -211,6 +213,27 @@ The page plays it from `GET /api/voice/speech/<id>`. Only lines the tutor
 produced can be spoken. If TTS fails, the text is shown and the lesson carries
 on. The browser's own speech recognition and speech voices are not used at all.
 
+**Qwen TTS load (rate limits).** Qwen limits how many TTS requests a workspace
+may send (HTTP 429, `Throttling.RateQuota`). The server (`SpeechStore` in
+`src/voice.js`) therefore:
+
+- gives each line an id but asks Qwen for nothing until the page asks for that
+  line's audio. The page asks one line at a time, as it plays them, plus the
+  next line ahead;
+- sends **one** TTS request at a time, at least `QWEN_TTS_MIN_GAP_MS` apart
+  (default 250 ms);
+- shares a request already on its way for the same line (deduplication);
+- caches audio by a hash of model, voice, language, speaking style and text,
+  in memory and on disk (`audio-cache/` next to the database; `TUTOR_AUDIO_CACHE`
+  to move it, `off` to disable). A line said before, on Repeat, a later day or
+  after a restart, is never requested again;
+- on 429 waits and retries (after 1 s, 3 s, 8 s: `QWEN_TTS_RETRY_MS`) while
+  holding the queue, then stops with "Qwen's voice is busy right now (rate
+  limit)". Listen & Learn pauses on that line (nothing is completed) and ▶ Play
+  tries again;
+- drops a queued request the page no longer needs (Next, Pause, Exit) before it
+  is sent.
+
 ## Listen & Learn
 
 Tap **🎧 Listen & Learn**, put the phone down, and listen. Nothing is asked and
@@ -244,8 +267,10 @@ After a short pause, the next word starts by itself.
 
 Controls: **▶ Play / ⏸ Pause** (Play resumes the interrupted step), **↻ Repeat**
 (the current word's lesson again), **→ Next** (optional: skip ahead now),
-**Exit Listen Mode**. The next lesson is fetched while the current one plays, and
-each line is synthesised once and reused.
+**Exit Listen Mode**. The next lesson's text is fetched while the current one
+plays. Audio is generated line by line as it is played (one line ahead), each
+line only once: Pause, Resume and Repeat reuse the audio the page already has,
+and audio still arriving after Next is never played.
 
 Play is continuous. When the last line of a word's audio has played to its end
 (the audio `ended` event, not a timer), that word is recorded as completed and,
@@ -259,7 +284,7 @@ complete. ▶ Play tries again · → Next skips it." ▶ Play asks Qwen for tha
 again and carries on. If a finished word cannot be saved, the player also stops
 and ▶ Play saves it.
 
-The page shows its version at the bottom (for example `v1.0.3`). If the page and
+The page shows its version at the bottom (for example `v1.0.4`). If the page and
 the server differ, a notice says so. Stop the server, `git pull`,
 `npm install`, start it again and reload the page.
 

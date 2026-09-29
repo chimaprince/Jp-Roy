@@ -12,6 +12,10 @@
 //        returns a short-lived audio URL (or inline data); the server fetches
 //        it and relays the bytes, so the browser never sees Qwen URLs.
 
+import { createHash } from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+
 export const ASR_DEFAULT_MODEL = 'qwen-audio-3.1-asr-flash';
 export const ASR_DEFAULT_BASE_URL = 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1';
 export const NATIVE_PATH = '/api/v1/services/aigc/multimodal-generation/generation';
@@ -257,6 +261,15 @@ export function createVoice({ env = process.env, fetchImpl = fetch, log = consol
       return { text: out.text, language: lang, detectedLanguage: out.detectedLanguage, model: s.asrModel, status: res.status, request: used };
     },
 
+    // A stable cache key for one spoken line: everything that decides the
+    // audio (model, voice, language, speaking style, text). Never the key.
+    ttsKey(text) {
+      const clean = String(text ?? '').trim().slice(0, MAX_TTS_CHARS);
+      const language = ttsLanguage(clean);
+      const instructions = language === 'Chinese' ? s.ttsInstructionsZh : s.ttsInstructionsEn;
+      return createHash('sha256').update(JSON.stringify([s.ttsModel, s.ttsVoice, language, instructions, clean])).digest('hex');
+    },
+
     // One spoken line → { audio: Buffer, mime, status } (status: Qwen's HTTP status).
     async synthesize(text) {
       const headers = requireKey('tts');
@@ -286,31 +299,47 @@ export function createVoice({ env = process.env, fetchImpl = fetch, log = consol
   };
 }
 
-// Teacher lines waiting to be spoken. Each line of a tutor reply gets an id;
-// synthesis starts straight away, and the page fetches the audio by id. Only
-// text the tutor itself said can be synthesised: the browser never sends text
-// to speak. Old entries are dropped.
+// Teacher lines waiting to be spoken. Each line of a tutor reply or a Listen &
+// Learn lesson gets an id, but NOTHING is synthesised until the page asks for
+// that id's audio (it asks one line at a time, as it plays them). Then:
+//
+//   1. cache: a line said before (same model, voice, language, style and text)
+//      comes from memory or from the audio cache on disk; no Qwen request;
+//   2. deduplication: a request already on its way for the same line is shared;
+//   3. queue: otherwise one job joins the TTS queue, which sends ONE request to
+//      Qwen at a time, with a short gap between requests. If Qwen answers 429
+//      (Throttling.RateQuota) it waits and tries again (by default after 1 s,
+//      3 s, 8 s), holding the queue so nothing else is sent meanwhile, then
+//      gives up with a clear "rate-limited" error. Nothing is retried forever.
+//
+// A queued job that nobody waits for any more (the page moved on, paused or
+// skipped) is dropped before it is sent. Only text the tutor itself said can be
+// synthesised: the browser never sends text to speak.
+export const TTS_RETRY_DELAYS_MS = [1000, 3000, 8000];
+export const TTS_MIN_GAP_MS = 250;
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Qwen signals throttling (Throttling.RateQuota, "Requests rate limit exceeded") with HTTP 429.
+const isRateLimit = (err) => err?.httpStatus === 429;
+
 export class SpeechStore {
-  constructor(voice, { max = 100, log = console.error } = {}) {
-    this.voice = voice;
-    this.max = max;
-    this.log = log;
-    this.items = new Map();
-    this.byText = new Map(); // text -> audio job, so repeated lines are synthesised once
+  constructor(voice, { max = 500, log = console.error, cacheDir = null, memoryItems = 200, retryDelays = TTS_RETRY_DELAYS_MS, minGapMs = TTS_MIN_GAP_MS } = {}) {
+    Object.assign(this, { voice, max, log, cacheDir, memoryItems, retryDelays, minGapMs });
+    this.items = new Map(); // id -> { key, text }
+    this.memory = new Map(); // key -> { audio, mime } (most recent last)
+    this.inflight = new Map(); // key -> job waiting for or getting its audio
+    this.queue = [];
+    this.busy = false;
+    this.lastSent = 0;
     this.next = 1;
+    this.stats = { requests: 0, cacheHits: 0, shared: 0, rateLimited: 0, dropped: 0 };
+    if (cacheDir) {
+      try { fs.mkdirSync(cacheDir, { recursive: true }); } catch (err) { this.log(`[voice] audio cache disabled (${err.message})`); this.cacheDir = null; }
+    }
   }
 
-  // The audio job for a line of text: reused if this text was synthesised
-  // before (Listen & Learn repeats, the same word again); failures are retried.
-  #job(text) {
-    let job = this.byText.get(text);
-    if (!job) {
-      job = this.voice.synthesize(text);
-      this.byText.set(text, job);
-      job.catch(() => { if (this.byText.get(text) === job) this.byText.delete(text); });
-      while (this.byText.size > this.max * 3) this.byText.delete(this.byText.keys().next().value);
-    }
-    return job;
+  #key(text) {
+    return this.voice?.ttsKey ? this.voice.ttsKey(text) : `text:${text}`;
   }
 
   // Adds `audio` ids to a tutor result's spoken lines (a copy; the engine's
@@ -325,31 +354,125 @@ export class SpeechStore {
     const lines = result[field].map((line) => {
       if (!String(line.text ?? '').trim()) return line;
       const id = `${Date.now().toString(36)}${(this.next++).toString(36)}`;
-      this.items.set(id, this.#track(id, { text: line.text, job: this.#job(line.text), failed: false }));
+      this.items.set(id, { key: this.#key(line.text), text: line.text });
       while (this.items.size > this.max) this.items.delete(this.items.keys().next().value);
       return { ...line, audio: id };
     });
     return { ...result, [field]: lines };
   }
 
-  #track(id, item) {
-    item.job.catch((err) => {
-      item.failed = true;
-      this.log(`[voice] TTS failed for line ${id}: ${err.message}${err.detail ? ` ${err.detail}` : ''}`);
-    });
-    return item;
-  }
-
-  // The audio job for a line id. If its synthesis failed, asking again (the
-  // player's retry) synthesises the line again instead of repeating the failure.
-  get(id) {
+  // The audio for a line id: a promise of { audio, mime }, or null for an
+  // unknown or expired id. `signal`: the caller no longer needs it once aborted.
+  get(id, { signal } = {}) {
     const item = this.items.get(String(id));
     if (!item) return null;
-    if (item.failed) {
-      item.failed = false;
-      item.job = this.#job(item.text);
-      this.#track(id, item);
+    return this.audio(item.key, item.text, { signal });
+  }
+
+  audio(key, text, { signal } = {}) {
+    const hit = this.#cached(key);
+    if (hit) { this.stats.cacheHits += 1; return Promise.resolve(hit); }
+    let job = this.inflight.get(key);
+    if (job) this.stats.shared += 1;
+    else {
+      job = { key, text, waiters: 0, started: false };
+      job.promise = new Promise((resolve, reject) => { job.resolve = resolve; job.reject = reject; });
+      job.promise.catch(() => {}); // a dropped job may have no one listening
+      this.inflight.set(key, job);
+      this.queue.push(job);
+      queueMicrotask(() => this.#pump());
     }
-    return item.job;
+    job.waiters += 1;
+    if (!signal) return job.promise;
+    return new Promise((resolve, reject) => {
+      const gone = () => {
+        job.waiters -= 1;
+        reject(new VoiceError('tts_cancelled', 'No longer needed.', { status: 499 }));
+        if (job.waiters === 0 && !job.started) {
+          // Nobody wants it and it was not sent yet: drop it unsent.
+          this.queue = this.queue.filter((j) => j !== job);
+          this.inflight.delete(key);
+          this.stats.dropped += 1;
+        }
+      };
+      if (signal.aborted) { gone(); return; }
+      signal.addEventListener('abort', gone, { once: true });
+      job.promise.then(
+        (v) => { signal.removeEventListener('abort', gone); resolve(v); },
+        (e) => { signal.removeEventListener('abort', gone); reject(e); },
+      );
+    });
+  }
+
+  // One job at a time, in order.
+  async #pump() {
+    if (this.busy) return;
+    this.busy = true;
+    try {
+      while (this.queue.length) {
+        const job = this.queue.shift();
+        job.started = true;
+        try {
+          const out = await this.#synthesize(job.text);
+          const audio = { audio: out.audio, mime: out.mime };
+          this.#remember(job.key, audio);
+          job.resolve(audio);
+        } catch (err) {
+          this.log(`[voice] TTS failed: ${err.message}${err.detail ? ` ${err.detail}` : ''}`);
+          job.reject(err); // not cached: asking again tries Qwen again
+        } finally {
+          this.inflight.delete(job.key);
+        }
+      }
+    } finally {
+      this.busy = false;
+    }
+  }
+
+  // One Qwen request (after the minimum gap), with a few spaced retries on 429.
+  async #synthesize(text) {
+    for (let attempt = 0; ; attempt += 1) {
+      const wait = this.lastSent + this.minGapMs - Date.now();
+      if (wait > 0) await sleep(wait);
+      this.lastSent = Date.now();
+      this.stats.requests += 1;
+      try {
+        return await this.voice.synthesize(text);
+      } catch (err) {
+        if (!isRateLimit(err)) throw err;
+        this.stats.rateLimited += 1;
+        if (attempt >= this.retryDelays.length) {
+          throw new VoiceError('tts_rate_limited', 'Qwen voice generation is rate-limited right now (too many requests). Wait a moment, then try again.', { status: 503, httpStatus: 429, detail: err.detail });
+        }
+        const delay = this.retryDelays[attempt];
+        this.log(`[voice] Qwen TTS rate-limited (429); retry ${attempt + 1} of ${this.retryDelays.length} in ${delay} ms`);
+        await sleep(delay);
+      }
+    }
+  }
+
+  #cached(key) {
+    const m = this.memory.get(key);
+    if (m) { this.memory.delete(key); this.memory.set(key, m); return m; }
+    const file = this.#file(key);
+    if (!file) return null;
+    try {
+      const audio = fs.readFileSync(file);
+      if (!audio.length) return null;
+      const found = { audio, mime: mimeFromBytes(audio) };
+      this.#remember(key, found, { disk: false });
+      return found;
+    } catch { return null; }
+  }
+
+  #remember(key, value, { disk = true } = {}) {
+    this.memory.set(key, value);
+    while (this.memory.size > this.memoryItems) this.memory.delete(this.memory.keys().next().value);
+    const file = disk && this.#file(key);
+    if (file) fs.writeFile(file, value.audio, (err) => { if (err) this.log(`[voice] could not save audio to the cache: ${err.message}`); });
+  }
+
+  #file(key) {
+    return this.cacheDir && /^[0-9a-f]{64}$/.test(key) ? path.join(this.cacheDir, `${key}.audio`) : null;
   }
 }

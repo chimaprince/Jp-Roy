@@ -24,11 +24,14 @@ export function cleanEnv() {
 // parts: the teacher (fixed, valid decisions; every context it gets is kept in
 // seen.teacher) and native Qwen ASR (returns asrText; the audio the browser
 // uploaded is kept in seen.asrAudio as bytes).
-export async function startListenQwen({ interactive = null } = {}) {
+// Every TTS call is counted (seen.tts), with its text (seen.ttsText) and the
+// highest number in flight at once (seen.ttsPeak). ttsDelayMs makes each call
+// take that long; ttsFail(text, n) can make a call answer 429 (return true).
+export async function startListenQwen({ interactive = null, ttsDelayMs = 0, ttsFail = null } = {}) {
   const http = await import('node:http');
   const { encodeWav } = await import('../public/voice-core.js');
   const wav = Buffer.from(encodeWav(Float32Array.from({ length: 2400 }, (_, i) => 0.2 * Math.sin(i / 8)), 24000)); // 0.1 s
-  const seen = { writer: [], tts: 0, teacherTurns: 0, teacher: [], asrAudio: [], ttsText: [] };
+  const seen = { writer: [], tts: 0, teacherTurns: 0, teacher: [], asrAudio: [], ttsText: [], ttsInFlight: 0, ttsPeak: 0, tts429: 0 };
   const decision = (over) => ({
     intent: 'answer', understood: true, correct: null, needs_retry: false, exercise_complete: false,
     next_action: 'same_exercise', student_confidence: 'ok', jump_target: null, roleplay_role: null, notes: '', ...over,
@@ -39,7 +42,14 @@ export async function startListenQwen({ interactive = null } = {}) {
     const json = (b, status = 200) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(b)); };
     if (req.url === '/tts') {
       seen.tts += 1;
-      try { seen.ttsText.push(JSON.parse(raw).input.text); } catch { /* ignore */ }
+      let text = '';
+      try { text = JSON.parse(raw).input.text; } catch { /* ignore */ }
+      seen.ttsText.push(text);
+      seen.ttsInFlight += 1;
+      seen.ttsPeak = Math.max(seen.ttsPeak, seen.ttsInFlight);
+      if (ttsDelayMs) await new Promise((r) => setTimeout(r, ttsDelayMs));
+      seen.ttsInFlight -= 1;
+      if (ttsFail?.(text, seen.tts)) { seen.tts429 += 1; return json({ code: 'Throttling.RateQuota', message: 'Requests rate limit exceeded, please try again later.' }, 429); }
       return json({ output: { audio: { data: wav.toString('base64') } } });
     }
     if (req.url === '/teacher/chat/completions') {
@@ -85,7 +95,7 @@ export async function startTutorServer(qwenPort, extraEnv = {}) {
   const port = await freePort();
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'roy-flow-'));
   const base = `http://127.0.0.1:${qwenPort}`;
-  const env = { ...cleanEnv(), TUTOR_ENV_FILE: 'none', PORT: String(port), HOST: '127.0.0.1', TUTOR_DB: path.join(dir, 'tutor.db'), DASHSCOPE_API_KEY: 'test-key-flow', QWEN_BASE_URL: `${base}/teacher`, QWEN_ASR_BASE_URL: `${base}/asr`, QWEN_TTS_URL: `${base}/tts`, ...extraEnv };
+  const env = { ...cleanEnv(), TUTOR_ENV_FILE: 'none', PORT: String(port), HOST: '127.0.0.1', TUTOR_DB: path.join(dir, 'tutor.db'), DASHSCOPE_API_KEY: 'test-key-flow', QWEN_BASE_URL: `${base}/teacher`, QWEN_ASR_BASE_URL: `${base}/asr`, QWEN_TTS_URL: `${base}/tts`, QWEN_TTS_MIN_GAP_MS: '50', QWEN_TTS_RETRY_MS: '50,100,150', ...extraEnv };
   const child = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', 'server.js'], { cwd: appDir, env });
   let out = '';
   await new Promise((resolve, reject) => {
