@@ -17,6 +17,24 @@ phone microphone → server → Qwen ASR (qwen-audio-3.1-asr-flash) → tutor + 
 → Qwen TTS (qwen3-tts-instruct-flash, voice Cherry) → server → phone speaker
 ```
 
+## Everyday use (phone or laptop)
+
+1. On the laptop, double-click **`start-tutor.cmd`** in the `roy-tutor` folder
+   (the same as `npm run start:https`). Leave the window open. It prints the
+   address to open.
+2. **iPhone:** open the printed `https://192.168.137.1:3443` address in Safari
+   (laptop hotspot; on shared Wi-Fi use the other address it prints). The first
+   time only, trust the development certificate (see below).
+   **Laptop:** open `https://localhost:3443`.
+3. Allow the microphone when asked (needed for Interactive Practice only).
+4. **🎧 Listen & Learn:** put on earphones and press it once. The teacher teaches
+   each word and moves on to the next by itself. ⏸ Pause, ▶ Play, ↻ Repeat and
+   → Next are there if you want them.
+5. **🎙 Interactive Practice:** press it and talk with the teacher.
+
+Both modes share one place in the course, so you always continue where you
+stopped.
+
 ## Quick start
 
 Needs Node 22.5 or later (uses the built-in `node:sqlite`).
@@ -145,6 +163,12 @@ explain the meaning in English, make a sentence, and a short role-play (Roy as
 interpreter, doctor, patient, nurse or hospital staff). The word is complete
 when all four are done.
 
+Before asking for Roy's sentence, the teacher teaches practical usage: how the
+term is used in real medical communication, where Roy would hear or use it
+(doctor, patient, interpreter), and a model sentence containing the exact term
+(for 硬膜外: 我们需要给你做硬膜外麻醉。). If Listen & Learn has already stored a
+checked example for that word, the teacher uses the same one.
+
 - **The tutor engine** (`src/tutor.js`) owns the rules: curriculum order, which
   exercise comes next, when a word is complete, review, side trips that keep
   Roy's place, and progress.
@@ -223,14 +247,19 @@ Controls: **▶ Play / ⏸ Pause** (Play resumes the interrupted step), **↻ Re
 **Exit Listen Mode**. The next lesson is fetched while the current one plays, and
 each line is synthesised once and reused.
 
-Play is continuous: when the last line of a word's audio has finished, that word
-is recorded as completed and the next one starts by itself. The status line
-shows "Completed Word 1. Starting Word 2…". Nothing is completed while a lesson
-is loading, while paused, or if any of its audio failed. Then the line says
-"Word 1 was not heard in full, so it is not marked complete. Starting Word 2…"
-and your place stays at Word 1.
+Play is continuous. When the last line of a word's audio has played to its end
+(the audio `ended` event, not a timer), that word is recorded as completed and,
+after a short pause, the next one starts by itself. The status line shows
+"Completed Word 1. Starting Word 2…". Pause, Repeat and loading never complete
+or advance anything; Next skips a word without completing it.
 
-The page shows its version at the bottom (for example `v1.0.2`). If the page and
+If a line's audio cannot be played (Qwen TTS failed, network), the player stops
+on that line: "Word 1: this line's audio could not be played, so Word 1 is not
+complete. ▶ Play tries again · → Next skips it." ▶ Play asks Qwen for that line
+again and carries on. If a finished word cannot be saved, the player also stops
+and ▶ Play saves it.
+
+The page shows its version at the bottom (for example `v1.0.3`). If the page and
 the server differ, a notice says so. Stop the server, `git pull`,
 `npm install`, start it again and reload the page.
 
@@ -270,7 +299,7 @@ twice on it.
 |---|---|
 | Microphone blocked / missing / busy | a clear message; the type-instead box opens |
 | ASR fails or hears nothing | nothing counted; **↻ RETRY** resends the recording, or say it again |
-| TTS fails | the teacher's text is shown; the lesson carries on. In Listen & Learn the text stays on screen, and a lesson with no audio at all pauses |
+| TTS fails | Interactive: the teacher's text is shown and the lesson carries on. Listen & Learn: stops on that line with a message, the word is not completed, ▶ Play asks Qwen for the line again |
 | Qwen teacher slow or unreachable | request timeout (`QWEN_TIMEOUT_MS`), one retry, then "took too long … nothing was counted" |
 | Qwen teacher reply malformed | repaired when possible, otherwise one corrected retry, then "unusable reply … nothing was counted" |
 | Network drop / phone reconnect | Interactive: "can't reach the tutor server", the answer is not counted. Listen & Learn pauses at the same step; ▶ Play retries |
@@ -295,9 +324,13 @@ servers that check every request. The tests cover:
   play is also tested against the real server (`test/listen-flow.test.js`) and in
   real Chromium (`test/browser.test.js`). It clicks Listen & Learn once and
   expects Word 1 → 2 → 3 with no further clicks, the real audio `ended` events
-  and the progress line following. It also covers Pause, Resume, Repeat, Next
-  and an audio failure. On a failure it prints the browser's timeline. It is
-  skipped only if Playwright is not installed.
+  and the progress line following. It also covers Pause, Resume, Repeat, Next,
+  an audio failure and its retry, the whole sequence ending in Interactive
+  Practice at the same place, and a spoken answer through Chromium's fake
+  microphone (recording → 16 kHz WAV → server → ASR → evaluation → teacher →
+  TTS → playback, no browser speech engines, the key never sent to the page).
+  On a failure it prints the browser's timeline. It is skipped only if
+  Playwright is not installed.
 - **Voice:** ASR and TTS requests, server-side audio, no browser speech APIs, the
   key never reaching the browser.
 - **Phone:** HTTPS certificates, LAN binding, the setup page, the access code.

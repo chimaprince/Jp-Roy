@@ -8,7 +8,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { listenLesson, REQUIRED_STEPS, REVIEW_STEPS } from '../src/listen.js';
 import { checkListenContent, templateContent, createListenWriter } from '../src/listencontent.js';
-import { ListenController } from '../public/voice-core.js';
+import { ListenController, listenStatusText } from '../public/voice-core.js';
 
 const appDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const HAN = /\p{Script=Han}/u;
@@ -262,25 +262,65 @@ test('Pause keeps the place; Play resumes the interrupted step; the lesson still
   assert.deepEqual(completed, [1]);
 });
 
-test('a failed audio step: the lesson moves on but is not counted; no audio at all pauses', async () => {
-  let n = 0;
+test('a failed audio line: the player stops on it, the word is not completed, Play retries that line and then continues', async () => {
+  let failing = true;
+  const played = [];
   const completed = [];
   const errors = [];
   const p = new ListenController({
-    playStep: () => (++n === 2 ? Promise.reject(Object.assign(new Error('tts'), { code: 'tts_failed' })) : Promise.resolve()),
+    playStep: async (step) => {
+      if (step.text === 'w1-2' && failing) throw Object.assign(new Error('tts'), { code: 'tts_failed' });
+      played.push(step.text);
+    },
     loadLesson: lessons(2),
     onComplete: (l) => completed.push(l.position),
     onError: (e) => errors.push(e.code),
     wait: () => Promise.resolve(),
   });
   await p.open(undefined);
-  assert.deepEqual(completed, [2], 'word 1 had a failed step; word 2 played fully');
+  assert.equal(p.state, 'paused', 'stops on the failed line (no advance)');
+  assert.equal(p.view.position, 1);
+  assert.equal(p.view.index, 1, 'on the failed line');
+  assert.equal(p.view.problem, 'audio');
+  assert.match(listenStatusText(p.view), /^Word 1: this line's audio could not be played, so Word 1 is not complete\. ▶ Play tries again/);
+  assert.deepEqual(completed, [], 'not completed');
+  assert.deepEqual(errors, ['tts_failed'], 'the error is reported');
+  await settle();
+  assert.equal(p.view.position, 1, 'still Word 1 later: nothing advances by itself');
+
+  failing = false;
+  p.play(); // retry
+  await settle();
+  assert.deepEqual(played, ['w1-1', 'w1-2', 'w2-1', 'w2-2'], 'the failed line again, then on as usual');
+  assert.deepEqual(completed, [1, 2]);
   assert.equal(p.state, 'finished');
 
   const silent = new ListenController({ playStep: () => Promise.reject(Object.assign(new Error('tts'), { code: 'tts_failed' })), loadLesson: lessons(3), onError: (e) => errors.push(e.code), wait: () => Promise.resolve() });
   await silent.open(undefined);
-  assert.equal(silent.state, 'paused', 'does not race silently through the curriculum');
+  assert.equal(silent.state, 'paused', 'no voice at all: stops at once');
   assert.equal(silent.view.position, 1);
+  assert.equal(silent.view.index, 0);
+});
+
+test('a failed save: the word is heard but not recorded, the player pauses; Play saves it and continues', async () => {
+  let online = false;
+  const completed = [];
+  const p = new ListenController({
+    ...autoAudio(),
+    loadLesson: lessons(2),
+    onComplete: async (l) => { if (!online) throw Object.assign(new TypeError('Failed to fetch'), { code: 'network' }); completed.push(l.position); },
+    wait: () => Promise.resolve(),
+  });
+  await p.open(undefined);
+  assert.equal(p.state, 'paused');
+  assert.equal(p.view.position, 1, 'does not move on to Word 2 while Word 1 is unsaved');
+  assert.equal(p.view.problem, 'not_saved');
+  assert.match(listenStatusText(p.view), /was heard in full but could not be saved/);
+  online = true;
+  p.play();
+  await settle();
+  assert.deepEqual(completed, [1, 2]);
+  assert.equal(p.state, 'finished');
 });
 
 test('network failure pauses at the same step (no racing ahead); Play retries', async () => {

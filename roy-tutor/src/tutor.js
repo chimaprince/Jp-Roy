@@ -19,7 +19,7 @@ const EXERCISES = ['pronounce', 'meaning', 'sentence', 'roleplay'];
 const EXERCISE_GOALS = {
   pronounce: 'Roy says the Mandarin term aloud.',
   meaning: 'Roy explains in English, in his own words, what the term means. Any wording that shows he understands the concept counts.',
-  sentence: 'Roy makes a short Mandarin sentence that uses the term.',
+  sentence: 'First teach practical usage: in one or two short sentences say how the term is used in real medical communication and where Roy would hear or use it (doctor, patient or interpreter), then give one natural model sentence containing the exact term (a zh line) and its English. Use current_entry.practical_usage when it is given. Then ask Roy to make his own short Mandarin sentence with the term. Only his own sentence completes this exercise.',
   roleplay: 'A short interpreting scene (2-3 exchanges). You play the other people; Roy plays his role and must use the term in Mandarin.',
   review: 'Roy recalls the Mandarin for this English term (he studied it before).',
 };
@@ -67,6 +67,15 @@ function entryFacts(entry, total) {
     meaning: entry.meaning ?? null,
     source_page: entry.source_page ?? null,
   };
+}
+
+// The teacher-written practical usage for an entry, if Listen & Learn already
+// stored it (checked: the sentence contains the exact term). Both modes then
+// teach the same example.
+function practicalUsage(db, entry) {
+  const c = store.getListenContent(db, entry.id);
+  if (!c?.sentence_zh || !c.sentence_zh.includes(entry.mandarin)) return null;
+  return { sentence_zh: c.sentence_zh, sentence_en: c.sentence_en ?? null, usage_en: c.usage_en ?? null, context_en: c.context_en ?? null };
 }
 
 export class Tutor {
@@ -442,7 +451,7 @@ export class Tutor {
         review_items_left_after_this: s.stage === 'review' ? s.review.queue.length : null,
         microphone_language_now: LANGUAGE_NAME[this.#listenLanguage(session)] ?? null,
       },
-      current_entry: entry ? entryFacts(entry, total) : null,
+      current_entry: entry ? { ...entryFacts(entry, total), practical_usage: practicalUsage(this.db, entry) } : null,
       if_complete: this.#previewIfComplete(course, session),
       recent_entries: this.#recentEntries(course, entry),
       weak_words: store.weakEntries(this.db, this.userId, course.id, WEAK_LIMIT).map((e) => ({ english: e.english, mandarin: e.mandarin })),

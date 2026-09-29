@@ -345,6 +345,22 @@ test('teacher lines get audio ids; the engine result itself is not changed; fail
   assert.equal(new SpeechStore({ configured: false }).attach(result), result, 'no Qwen key: text only');
 });
 
+test('a line whose TTS failed is synthesised again when its audio is asked for again (the player\'s retry)', async () => {
+  let down = true;
+  let calls = 0;
+  const voice = { configured: true, async synthesize() { calls += 1; if (down) throw new Error('tts down'); return { audio: WAV, mime: 'audio/wav' }; } };
+  const store = new SpeechStore(voice, { log: quiet });
+  const id = store.attachTo({ steps: [{ lang: 'zh', text: '硬膜外' }] }, 'steps').steps[0].audio;
+  await assert.rejects(store.get(id), /tts down/);
+  await assert.rejects(store.get(id), /tts down/, 'still down: fails again, honestly');
+  assert.equal(calls, 2, 'each retry really asks Qwen again');
+  down = false;
+  assert.deepEqual((await store.get(id)).audio, WAV, 'the retry succeeds once TTS is back');
+  assert.equal(calls, 3);
+  await store.get(id);
+  assert.equal(calls, 3, 'a line that worked is not synthesised again');
+});
+
 // ---------- the whole path through the real server ----------
 
 // A stand-in for Qwen: the teacher (chat), ASR (chat with audio) and TTS.

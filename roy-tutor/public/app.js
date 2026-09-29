@@ -633,22 +633,14 @@ $('mode-listen').addEventListener('click', () => {
 
 // ---------- Listen & Learn: Qwen TTS lessons, no microphone ----------
 
-const readingTime = (step) => 1500 + String(step.show || step.text).length * 60;
-
-// One step: fetch its Qwen audio from the server and play it. When there is no
-// audio (TTS failed or not configured) the text stays on screen for reading
-// time, and the step counts as failed, so the word is not marked as listened.
+// One step: fetch its Qwen audio from the server and play it to its 'ended'
+// event. If the audio cannot be fetched or played, the error goes to the
+// player, which stops on this line (its text stays on screen), does not mark
+// the word as listened, and retries the line on ▶ Play.
 async function playListenStep(step) {
   const run = speechRun;
-  let url;
-  try {
-    if (!step.audio) throw Object.assign(new Error('No teacher audio for this line.'), { code: 'tts_failed' });
-    url = await fetchAudio(step.audio);
-  } catch (err) {
-    if (err.code === 'network') throw err; // the player pauses; Play retries
-    await pause(readingTime(step));
-    throw err;
-  }
+  if (!step.audio) throw Object.assign(new Error('No teacher audio for this line.'), { code: 'tts_failed' });
+  const url = await fetchAudio(step.audio);
   if (run !== speechRun) { URL.revokeObjectURL(url); return; } // paused while the audio was loading
   try {
     await playUrl(url, playbackRate(step), run);

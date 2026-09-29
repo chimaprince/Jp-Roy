@@ -325,16 +325,31 @@ export class SpeechStore {
     const lines = result[field].map((line) => {
       if (!String(line.text ?? '').trim()) return line;
       const id = `${Date.now().toString(36)}${(this.next++).toString(36)}`;
-      const job = this.#job(line.text);
-      job.catch((err) => this.log(`[voice] TTS failed for line ${id}: ${err.message}${err.detail ? ` ${err.detail}` : ''}`));
-      this.items.set(id, job);
+      this.items.set(id, this.#track(id, { text: line.text, job: this.#job(line.text), failed: false }));
       while (this.items.size > this.max) this.items.delete(this.items.keys().next().value);
       return { ...line, audio: id };
     });
     return { ...result, [field]: lines };
   }
 
+  #track(id, item) {
+    item.job.catch((err) => {
+      item.failed = true;
+      this.log(`[voice] TTS failed for line ${id}: ${err.message}${err.detail ? ` ${err.detail}` : ''}`);
+    });
+    return item;
+  }
+
+  // The audio job for a line id. If its synthesis failed, asking again (the
+  // player's retry) synthesises the line again instead of repeating the failure.
   get(id) {
-    return this.items.get(String(id)) ?? null;
+    const item = this.items.get(String(id));
+    if (!item) return null;
+    if (item.failed) {
+      item.failed = false;
+      item.job = this.#job(item.text);
+      this.#track(id, item);
+    }
+    return item.job;
   }
 }

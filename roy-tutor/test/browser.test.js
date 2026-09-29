@@ -19,8 +19,10 @@ import assert from 'node:assert/strict';
 import { execSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import path from 'node:path';
-import { readFileSync } from 'node:fs';
+import fs, { readFileSync } from 'node:fs';
+import os from 'node:os';
 import { startListenQwen, startTutorServer } from './helpers.js';
+import { encodeWav } from '../public/voice-core.js';
 
 const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 const WAIT_MS = 20000; // one word here takes about 3 s (14 clips of 0.1 s + 1.2 s pause)
@@ -33,7 +35,7 @@ async function loadPlaywright() {
   } catch { return null; }
 }
 
-async function launch() {
+async function launch(extraArgs = []) {
   const pw = await loadPlaywright();
   if (!pw) return null;
   // The local server is reached directly, never through an outbound proxy.
@@ -43,7 +45,7 @@ async function launch() {
       env,
       // Test environment only: no autoplay prompt, and muted so a run makes no
       // sound (muted audio still plays and still fires 'ended').
-      args: ['--autoplay-policy=no-user-gesture-required', '--mute-audio', '--no-proxy-server'],
+      args: ['--autoplay-policy=no-user-gesture-required', '--mute-audio', '--no-proxy-server', ...extraArgs],
     });
   } catch {
     return null;
@@ -75,18 +77,29 @@ function recorder() {
     new MutationObserver(check).observe(el, { childList: true, characterData: true, subtree: true });
     check();
   };
+  // The tutor's voice must come from the server (Qwen), never the browser's
+  // own speech engines: any use of them is recorded (and fails the tests).
+  const forbidden = (name) => class { constructor() { note('forbidden', name); } start() {} stop() {} abort() {} };
+  window.SpeechRecognition = forbidden('SpeechRecognition');
+  window.webkitSpeechRecognition = forbidden('webkitSpeechRecognition');
+  if (window.speechSynthesis) window.speechSynthesis.speak = () => note('forbidden', 'speechSynthesis.speak');
   document.addEventListener('DOMContentLoaded', () => {
     watch('listen-state', 'state');
     watch('progress', 'progress');
     watch('card-position', 'card');
     watch('listen-where', 'where');
+    watch('mic-state', 'mic');
+    watch('heard', 'heard');
+    watch('status', 'status');
   });
   document.addEventListener('click', (e) => note('click', e.target.closest('button')?.id ?? ''), true);
 }
 
-async function openPage(url, { route } = {}) {
-  const page = await browser.newPage();
+async function openPage(url, { route, using = browser } = {}) {
+  const page = await using.newPage();
   const requests = [];
+  const bodies = []; // everything the server sent the page (checked for the key)
+  page.on('response', (r) => { r.body().then((b) => bodies.push(b.toString('latin1'))).catch(() => {}); });
   page.on('request', (r) => {
     const u = r.url().replace(url, '');
     if (u.startsWith('/api/')) requests.push({ method: r.method(), url: u, body: r.postData() });
@@ -113,14 +126,14 @@ async function openPage(url, { route } = {}) {
   };
   const texts = async (kind) => (await timeline()).filter((e) => e.kind === kind).map((e) => e.text);
   const completes = () => requests.filter((r) => r.url === '/api/listen/complete').map((r) => JSON.parse(r.body));
-  return { page, requests, timeline, dump, waitFor, texts, completes };
+  return { page, requests, bodies, timeline, dump, waitFor, texts, completes };
 }
 
 const state = (re) => (e) => e.kind === 'state' && re.test(e.text);
 const place = async (url) => (await (await fetch(`${url}/api/status`)).json()).position;
 
-async function withServer(fn) {
-  const q = await startListenQwen();
+async function withServer(fn, qwenOptions) {
+  const q = await startListenQwen(qwenOptions);
   const s = await startTutorServer(q.port);
   try { await fn(s, q); } finally { await s.stop(); await q.close(); }
 }
@@ -246,27 +259,150 @@ test('browser: Next skips to the next word at once (the skipped word is not comp
   });
 });
 
-test('browser: an audio failure does not complete the word', { skip }, async () => {
+test('browser: an audio failure stops on that line with a clear error, does not complete the word, and ▶ Play retries it', { skip }, async () => {
   let speech = 0;
-  // The server's audio for Word 1's second line fails (as if Qwen TTS failed).
+  // The server's audio for Word 1's second line fails once (as if Qwen TTS failed).
   const route = (r) => (++speech === 2 ? r.fulfill({ status: 502, contentType: 'application/json', body: JSON.stringify({ error: 'TTS failed', code: 'tts_failed' }) }) : r.continue());
   await withServer(async (s) => {
     const p = await openPage(s.url, { route });
     try {
       await p.page.click('#mode-listen');
-      // Word 1 carries on (the failed line's text stays on screen) ...
-      await p.waitFor('Word 1 reaches its last step', (e) => e.kind === 'state' && /^Playing Word 1 · (\d+) of \1$/.test(e.text));
-      // ... then says it was not completed, and moves on without completing it.
-      await p.waitFor('the "not complete" status', state(/^Word 1 was not heard in full, so it is not marked complete\. Starting Word 2…$/));
-      await p.waitFor('Word 2 playing', state(/^Playing Word 2 · 1 of/));
-      await p.page.click('#listen-pause');
-      const states = await p.texts('state');
-      assert.ok(!states.some((t) => /^Completed Word 1/.test(t)), states.join(' | '));
+      const stopped = await p.waitFor('the failed line stops the player', state(/^Word 1: this line's audio could not be played, so Word 1 is not complete\. ▶ Play tries again · → Next skips it\.$/));
+      assert.match(await p.page.textContent('#notice'), /voice \(Qwen\) is not available/, 'a clear error is shown');
+      await p.page.waitForTimeout(2500); // longer than the rest of the word would take
+      const later = (await p.timeline()).filter((e) => e.kind === 'state' && e.t > stopped.t);
+      assert.deepEqual(later, [], 'nothing moves on by itself after the failure');
       assert.equal(p.completes().length, 0, 'no completion was sent for Word 1');
       assert.equal(await place(s.url), 1, 'the place stays at Word 1');
       assert.match(await p.page.textContent('#progress'), /Word 1 of 385/);
+
+      await p.page.click('#listen-play'); // retry
+      const retried = await p.waitFor('the failed line again', (e) => e.kind === 'state' && e.t > stopped.t && /^Playing Word 1 · 2 of/.test(e.text));
+      await p.waitFor('its audio really plays this time', (e) => e.kind === 'audio' && e.text === 'ended' && e.t > retried.t);
+      await p.waitFor('Word 1 completed after the retry', state(/^Completed Word 1\. Starting Word 2…$/));
+      await p.waitFor('then Word 2 by itself', state(/^Playing Word 2 · 1 of/));
+      await p.page.click('#listen-pause');
+      assert.deepEqual(p.completes(), [{ position: 1, review: false }]);
+      assert.equal(await place(s.url), 2);
     } finally {
       await p.page.close();
     }
   });
+});
+
+// The whole sequence in one sitting, as Roy would use it (Phase 22 of the brief).
+test('browser: full sequence: auto-advance 1→2→3, Pause, Resume, Repeat, finish once, Next, Exit, Interactive Practice at the same place', { skip }, async () => {
+  await withServer(async (s, q) => {
+    const p = await openPage(s.url);
+    const lastState = async () => (await p.timeline()).filter((e) => e.kind === 'state').at(-1)?.text;
+    try {
+      // 1-2. Home page, Word 1.
+      await p.waitFor('home shows Word 1', (e) => e.kind === 'progress' && e.text === 'Progress: Word 1 of 385');
+      // 3-5. Listen & Learn; Word 1 audio plays and really finishes.
+      await p.page.click('#mode-listen');
+      const w1 = await p.waitFor('Word 1 playing', state(/^Playing Word 1 · 1 of/));
+      await p.waitFor('Word 1 audio playing', (e) => e.kind === 'audio' && e.text === 'playing' && e.t > w1.t);
+      await p.waitFor('Word 1 finished', state(/^Completed Word 1\. Starting Word 2…$/));
+      // 6-8. Word 2 and Word 3 by themselves.
+      const w2 = await p.waitFor('Word 2 playing', state(/^Playing Word 2 · 1 of/));
+      await p.waitFor('Word 2 audio playing', (e) => e.kind === 'audio' && e.text === 'playing' && e.t > w2.t);
+      await p.waitFor('Word 3 playing', state(/^Playing Word 3 · 2 of/));
+      // 9-10. Pause: no progress.
+      await p.page.click('#listen-pause');
+      const paused = await p.waitFor('paused', state(/^Paused at Word 3\./));
+      await p.page.waitForTimeout(2500);
+      assert.match(await lastState(), /^Paused at Word 3\./, 'still paused');
+      assert.equal(await place(s.url), 3, 'pause did not advance');
+      // 11-12. Resume: the audio continues in Word 3.
+      await p.page.click('#listen-play');
+      const resumed = await p.waitFor('resumed in Word 3', (e) => e.kind === 'state' && e.t > paused.t && /^Playing Word 3 · /.test(e.text));
+      await p.waitFor('audio continues', (e) => e.kind === 'audio' && e.text === 'playing' && e.t > resumed.t);
+      // 13-15. Repeat: Word 3 from its first line, no advance.
+      await p.waitFor('a later line of Word 3', (e) => e.kind === 'state' && e.t > resumed.t && /^Playing Word 3 · ([4-9]|1\d) of/.test(e.text));
+      await p.page.click('#listen-repeat');
+      const again = await p.waitFor('Word 3 again from the start', (e) => e.kind === 'state' && e.t > resumed.t && e.text.startsWith('Playing Word 3 · 1 of'));
+      assert.equal(await place(s.url), 3, 'repeat did not advance');
+      assert.equal(p.completes().filter((c) => c.position === 3).length, 0);
+      // 16-17. Let it finish: exactly one advance.
+      await p.waitFor('Word 3 finished', (e) => e.kind === 'state' && e.t > again.t && e.text === 'Completed Word 3. Starting Word 4…');
+      const w4 = await p.waitFor('Word 4 playing', state(/^Playing Word 4 · 1 of/));
+      assert.deepEqual(p.completes().map((c) => c.position), [1, 2, 3], 'each word completed exactly once');
+      assert.equal(await place(s.url), 4);
+      // 18-20. Next: skips exactly one word; the skipped word is not completed.
+      await p.page.click('#listen-next');
+      await p.waitFor('Word 5 after Next', (e) => e.kind === 'state' && e.t > w4.t && /^Playing Word 5 · 1 of/.test(e.text));
+      await p.page.click('#listen-pause');
+      assert.ok(!(await p.texts('state')).some((t) => /Word 6/.test(t)), 'only one word skipped');
+      assert.deepEqual(p.completes().map((c) => c.position), [1, 2, 3], 'Word 4 (skipped) was not completed');
+      assert.equal(await place(s.url), 4, 'the place is the skipped Word 4');
+      // 21-23. Exit, then Interactive Practice starts at the same place.
+      await p.page.click('#listen-exit');
+      await p.waitFor('home shows Word 4', (e) => e.kind === 'progress' && e.text === 'Progress: Word 4 of 385');
+      await p.page.click('#mode-interactive');
+      await p.waitFor('the teacher is asked to start the lesson', () => q.seen.teacher.some((c) => c.event === 'session_start'));
+      await p.waitFor('Interactive Practice speaks', (e) => e.kind === 'mic' && e.text === 'TEACHER SPEAKING');
+      assert.match(await p.page.textContent('#card-position'), /^Word 4\b/, 'the card shows Word 4');
+      const start = q.seen.teacher.find((c) => c.event === 'session_start');
+      assert.equal(start.current_entry.position, 4, 'Interactive Practice teaches Word 4');
+      assert.equal(start.course.curriculum_position, 4);
+      assert.deepEqual(await p.texts('forbidden'), [], 'no browser speech engines');
+    } finally {
+      await p.page.close();
+    }
+  }, { interactive: { asrText: '硬膜外' } });
+});
+
+// A spoken answer through the real page: Chromium's fake microphone plays a
+// recorded WAV (a stand-in for Roy's voice), the page records it, converts it
+// to 16 kHz WAV and uploads it; the server sends it to (stand-in) Qwen ASR; the
+// transcript goes through the ASR-aware evaluation to the teacher; the reply is
+// spoken by (stand-in) Qwen TTS and played by the page.
+const micDir = fs.mkdtempSync(path.join(os.tmpdir(), 'roy-mic-'));
+const micFile = path.join(micDir, 'roy.wav');
+{
+  const rate = 48000;
+  const voiceLike = (t) => (0.35 + 0.25 * Math.sin(2 * Math.PI * 4 * t)) * (Math.sin(2 * Math.PI * 190 * t) + 0.5 * Math.sin(2 * Math.PI * 380 * t) + 0.25 * Math.sin(2 * Math.PI * 760 * t)) / 1.75;
+  const samples = Float32Array.from({ length: rate * 6 }, (_, i) => { const t = i / rate; return t > 0.5 && t < 2.3 ? 0.6 * voiceLike(t) : 0; });
+  fs.writeFileSync(micFile, Buffer.from(encodeWav(samples, rate)));
+}
+const micBrowser = browser && await launch(['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', `--use-file-for-fake-audio-capture=${micFile}%noloop`]);
+after(() => micBrowser?.close());
+
+test('browser: Interactive Practice by voice: microphone → server → Qwen ASR → evaluation → teacher → Qwen TTS → playback', { skip: !micBrowser && 'Playwright/Chromium not installed' }, async () => {
+  await withServer(async (s, q) => {
+    const p = await openPage(s.url, { using: micBrowser });
+    try {
+      await p.page.click('#mode-interactive');
+      // The teacher's opening lines are Qwen TTS audio played by the page.
+      const listening = await p.waitFor('the page listens after the teacher spoke', (e) => e.kind === 'mic' && e.text === 'LISTENING');
+      const teacherAudio = (await p.timeline()).filter((e) => e.kind === 'audio' && e.text === 'ended' && e.t < listening.t).length;
+      assert.ok(teacherAudio >= 3, `the teacher's 3 lines played to their end first (${teacherAudio})`);
+      // Roy's answer is recorded, sent, recognised, and shown.
+      await p.waitFor('the transcript from Qwen ASR is shown', (e) => e.kind === 'heard' && e.text.includes('磨膜外'));
+      assert.equal(q.seen.asrAudio.length, 1, 'one recording went to Qwen ASR');
+      const wav = q.seen.asrAudio[0];
+      assert.equal(wav.toString('ascii', 0, 4), 'RIFF', 'the recording reached ASR as WAV');
+      assert.equal(wav.readUInt32LE(24), 16000, '16 kHz');
+      const pcm = new Int16Array(wav.buffer.slice(wav.byteOffset + 44, wav.byteOffset + wav.length - (wav.length % 2)));
+      const seconds = pcm.length / 16000;
+      const peak = pcm.reduce((m, v) => Math.max(m, Math.abs(v)), 0) / 32768;
+      assert.ok(seconds > 1.5, `the whole answer was recorded (${seconds.toFixed(1)} s)`);
+      assert.ok(peak > 0.05, `real sound, not silence (peak ${peak.toFixed(2)})`);
+      // The engine judged the transcript with the lesson context, and the teacher got it.
+      await p.waitFor('the teacher replied', () => q.seen.teacher.some((c) => c.roy_said));
+      const turn = q.seen.teacher.find((c) => c.roy_said);
+      assert.equal(turn.roy_said.text, '磨膜外');
+      assert.match(turn.roy_said.input, /^voice/);
+      assert.equal(turn.roy_said.asr_evaluation.level, 'uncertain', '磨膜外 for 硬膜外: not called right, not called wrong');
+      assert.equal(turn.current_entry.mandarin, '硬膜外');
+      // The reply is spoken (Qwen TTS) and played, then the page listens again.
+      await p.waitFor('the reply played and the page listens again', (e) => e.kind === 'mic' && /^LISTENING/.test(e.text) && e.t > listening.t);
+      assert.ok(q.seen.ttsText.includes("I didn't quite catch that. Listen once more:"), 'the reply went to Qwen TTS');
+      assert.deepEqual(await p.texts('forbidden'), [], 'no SpeechRecognition / speechSynthesis in the browser');
+      assert.ok(!p.bodies.some((b) => b.includes('test-key-flow')), 'the API key never reached the browser');
+      assert.equal(await place(s.url), 1, 'an uncertain answer does not complete anything');
+    } finally {
+      await p.page.close();
+    }
+  }, { interactive: { asrText: '磨膜外' } });
 });

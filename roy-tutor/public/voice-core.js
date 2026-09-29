@@ -244,8 +244,8 @@ export class ListenController {
     this.state = 'idle';
     this.run = 0; // bumps to cancel whatever is in progress
     this.played = new Set(); // steps of this lesson whose audio played to the end
-    this.failedSteps = 0;
     this.completed = false; // this lesson played in full and was recorded as completed
+    this.problem = null; // why it is paused: 'audio' (a line could not be played) or 'not_saved'
     this.prefetched = null; // { key, promise } for the following lesson
     this.pending = undefined; // what to open when Play is pressed after a failed load
   }
@@ -263,6 +263,7 @@ export class ListenController {
       canNext: Boolean(this.lesson?.next),
       next: this.lesson?.next ?? null,
       completed: this.completed,
+      problem: this.state === 'paused' ? this.problem : null,
       loadingTarget: this.state === 'loading' ? this.loadingTarget ?? null : null,
     };
   }
@@ -311,12 +312,13 @@ export class ListenController {
     this.lesson = lesson;
     this.index = 0;
     this.played = new Set();
-    this.failedSteps = 0;
     this.completed = false;
+    this.problem = null;
     await this.#playFrom(run);
   }
 
   async #playFrom(run) {
+    this.problem = null;
     this.#set('playing');
     this.#prefetchNext();
     while (run === this.run && this.index < this.lesson.steps.length) {
@@ -325,9 +327,12 @@ export class ListenController {
         if (run === this.run) this.played.add(this.index);
       } catch (err) {
         if (run !== this.run) return;
-        if (PAUSE_ON.has(err?.code)) { this.pause(); this.onError(err); return; }
-        this.failedSteps += 1;
+        // A line that could not be played: stop on it, never skip it silently.
+        // The word is not complete; Play tries this line again, Next skips.
+        this.problem = PAUSE_ON.has(err?.code) ? null : 'audio';
+        this.pause();
         this.onError(err);
+        return;
       }
       if (run !== this.run) return;
       this.index += 1;
@@ -335,18 +340,31 @@ export class ListenController {
     }
     if (run !== this.run) return;
     this.index = this.lesson.steps.length - 1;
-    const steps = this.lesson.steps.length;
-    if (this.played.size === steps) {
+    await this.#finish(run);
+  }
+
+  // Every line has played to its end (the audio's 'ended' event): record the
+  // word as completed, then a short pause, then the next word.
+  async #finish(run) {
+    if (this.played.size !== this.lesson.steps.length) {
+      // Never complete a word that was not heard in full: back to the first missed line.
+      this.index = this.lesson.steps.findIndex((_, i) => !this.played.has(i));
+      this.problem = 'audio';
+      this.#set('paused');
+      return;
+    }
+    if (!this.completed) {
       try {
         await this.onComplete(this.lesson);
         this.completed = true;
-      } catch (err) { this.onError(err); }
+      } catch (err) {
+        if (run !== this.run) return;
+        this.problem = 'not_saved';
+        this.pause();
+        this.onError(err);
+        return;
+      }
       if (run !== this.run) return;
-    } else if (this.played.size === 0) {
-      // Not one step had audio: do not run silently through the curriculum.
-      this.#set('paused');
-      this.onError(Object.assign(new Error('The teacher voice is not available.'), { code: 'tts_failed' }));
-      return;
     }
     if (!this.lesson.next) { this.#set('finished'); return; }
     this.#set('gap');
@@ -355,15 +373,17 @@ export class ListenController {
     await this.open(this.lesson.next);
   }
 
-  // Play: start, resume after Pause (the interrupted step from its start),
-  // retry after a failed load, or move on if paused between lessons.
+  // Play: start; resume after Pause or a failed line (that line again);
+  // retry a failed load or a failed save; or move on if paused between lessons.
   play() {
     if (this.state === 'playing' || this.state === 'loading') return undefined;
     if (!this.lesson || this.pending !== undefined) return this.open(this.pending ?? undefined);
-    if (this.state === 'gap' || (this.state === 'paused' && this.index >= this.lesson.steps.length - 1 && this.played.has(this.index))) {
+    const heardAll = this.played.size === this.lesson.steps.length;
+    if (this.state === 'gap' || (this.state === 'paused' && heardAll)) {
+      if (!this.completed) { this.problem = null; return this.#finish(++this.run); }
       return this.lesson.next ? this.open(this.lesson.next) : undefined;
     }
-    if (this.state === 'finished') { this.index = 0; this.played = new Set(); }
+    if (this.state === 'finished') { this.index = 0; this.played = new Set(); this.completed = false; }
     return this.#playFrom(++this.run);
   }
 
@@ -381,7 +401,7 @@ export class ListenController {
     this.stopAudio();
     this.index = 0;
     this.played = new Set();
-    this.failedSteps = 0;
+    this.completed = false;
     return this.#playFrom(this.run);
   }
 
@@ -410,15 +430,16 @@ export function listenStatusText(view) {
   switch (view.state) {
     case 'loading': return view.loadingTarget ? `Starting ${wordName(view.loadingTarget)}…` : 'Preparing the lesson…';
     case 'playing': return `Playing ${here} · ${view.index + 1} of ${view.steps}`;
-    case 'gap': return view.completed
-      ? `Completed ${here}. Starting ${wordName(view.next)}…`
-      : `${here} was not heard in full, so it is not marked complete. Starting ${wordName(view.next)}…`;
-    case 'paused': return here ? `Paused at ${here}. ▶ Play to continue.` : 'Paused. ▶ Play to continue.';
-    case 'finished': return `${view.completed ? `Completed ${here}` : `${here} was not heard in full`}. That was the last word of JH Medics Volume 1.`;
+    case 'gap': return `Completed ${here}. Starting ${wordName(view.next)}…`;
+    case 'paused':
+      if (view.problem === 'audio') return `${here}: this line's audio could not be played, so ${here} is not complete. ▶ Play tries again · → Next skips it.`;
+      if (view.problem === 'not_saved') return `${here} was heard in full but could not be saved. ▶ Play tries again.`;
+      return here ? `Paused at ${here}. ▶ Play to continue.` : 'Paused. ▶ Play to continue.';
+    case 'finished': return `Completed ${here}. That was the last word of JH Medics Volume 1.`;
     default: return '';
   }
 }
 
 // Version of the page code; the server reports its own (package.json). A
 // difference means an old page or an old server process: reload / restart.
-export const CLIENT_VERSION = '1.0.2';
+export const CLIENT_VERSION = '1.0.3';

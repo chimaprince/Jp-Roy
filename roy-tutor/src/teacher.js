@@ -84,7 +84,7 @@ UNDERSTANDING ROY
 EXERCISES (for the current entry)
 - pronounce: Roy says the Mandarin term.
 - meaning: Roy explains in English, in his own words, what the term means.
-- sentence: Roy makes a short Mandarin sentence using the term.
+- sentence: first teach practical usage: how the term is used in real medical communication, where Roy would hear or use it (doctor, patient, interpreter), and one natural model sentence that contains the exact term (a zh line) with its English; use current_entry.practical_usage when given. Then Roy makes his own short Mandarin sentence using the term. Keep it consistent with the source meaning; do not add unrelated medical facts.
 - roleplay: a short interpreting scene (2-3 exchanges) where you play the other people (doctor, patient, nurse, staff) and Roy plays his role; the scene must make him use the term. Stay in the scene, correct briefly, keep it about the current term.
 - review: Roy recalls the Mandarin for an English term he studied before.
 Set exercise_complete true only when Roy has actually shown what the exercise asks for in this turn or earlier in this exercise. "Let's continue" or a request to skip does not complete an exercise. For review items you may also set exercise_complete true after revealing the answer and having him repeat it, with correct false.

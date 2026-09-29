@@ -20,16 +20,28 @@ export function cleanEnv() {
 
 // A local stand-in for Qwen used by the Listen & Learn flow tests: the example
 // writer (chat) and TTS (short real WAV clips). Counts what it was asked.
-export async function startListenQwen() {
+// With { interactive: { asrText } } it also plays the Interactive Practice
+// parts: the teacher (fixed, valid decisions; every context it gets is kept in
+// seen.teacher) and native Qwen ASR (returns asrText; the audio the browser
+// uploaded is kept in seen.asrAudio as bytes).
+export async function startListenQwen({ interactive = null } = {}) {
   const http = await import('node:http');
   const { encodeWav } = await import('../public/voice-core.js');
   const wav = Buffer.from(encodeWav(Float32Array.from({ length: 2400 }, (_, i) => 0.2 * Math.sin(i / 8)), 24000)); // 0.1 s
-  const seen = { writer: [], tts: 0, teacherTurns: 0 };
+  const seen = { writer: [], tts: 0, teacherTurns: 0, teacher: [], asrAudio: [], ttsText: [] };
+  const decision = (over) => ({
+    intent: 'answer', understood: true, correct: null, needs_retry: false, exercise_complete: false,
+    next_action: 'same_exercise', student_confidence: 'ok', jump_target: null, roleplay_role: null, notes: '', ...over,
+  });
   const server = http.createServer(async (req, res) => {
     let raw = '';
     for await (const c of req) raw += c;
     const json = (b, status = 200) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(b)); };
-    if (req.url === '/tts') { seen.tts += 1; return json({ output: { audio: { data: wav.toString('base64') } } }); }
+    if (req.url === '/tts') {
+      seen.tts += 1;
+      try { seen.ttsText.push(JSON.parse(raw).input.text); } catch { /* ignore */ }
+      return json({ output: { audio: { data: wav.toString('base64') } } });
+    }
     if (req.url === '/teacher/chat/completions') {
       const body = JSON.parse(raw);
       if (/listening material/.test(body.messages[0].content)) {
@@ -39,6 +51,22 @@ export async function startListenQwen() {
         return json({ id: 'w', choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: JSON.stringify(content) } }] });
       }
       seen.teacherTurns += 1;
+      if (interactive) {
+        const ctx = JSON.parse(body.messages.at(-1).content);
+        seen.teacher.push(ctx);
+        const level = ctx.roy_said?.asr_evaluation?.level;
+        const right = ['high_confidence_correct', 'likely_correct_asr_character_mismatch'].includes(level);
+        const d = !ctx.roy_said ? null
+          : right ? decision({ correct: true, exercise_complete: true, next_action: 'next_exercise', speech: [{ lang: 'en', text: 'Your syllables were right. Now, what does it mean?', show: null, slow: false }] })
+            : decision({ correct: null, needs_retry: true, next_action: 'retry', speech: [{ lang: 'en', text: "I didn't quite catch that. Listen once more:", show: null, slow: false }, { lang: 'zh', text: '硬膜外', show: '硬膜外 — yìng mó wài', slow: true }, { lang: 'en', text: 'Say it again.', show: null, slow: false }] });
+        const reply = d ?? decision({ speech: [{ lang: 'en', text: 'Word 1 is epidural.', show: null, slow: false }, { lang: 'zh', text: '硬膜外', show: '硬膜外 — yìng mó wài', slow: true }, { lang: 'en', text: 'Say it after me.', show: null, slow: false }] });
+        return json({ id: 't', object: 'chat.completion', created: 1, model: body.model, choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: JSON.stringify(reply) } }] });
+      }
+    }
+    if (interactive && req.url === '/api/v1/services/aigc/multimodal-generation/generation') {
+      const found = raw.match(/data:audio\/[a-z0-9.+-]+;base64,([A-Za-z0-9+/=]+)/);
+      seen.asrAudio.push(found ? Buffer.from(found[1], 'base64') : null);
+      return json({ request_id: 'asr-1', output: { choices: [{ message: { role: 'assistant', content: [{ text: interactive.asrText }] } }] } });
     }
     json({}, 500);
   });

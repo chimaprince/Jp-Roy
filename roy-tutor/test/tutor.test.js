@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { openDb, getProgress, getEntryProgress, activeCourse, entryAt } from '../src/db.js';
+import { openDb, getProgress, getEntryProgress, activeCourse, entryAt, saveListenContent } from '../src/db.js';
 import { upsertCourse, importEntries } from '../src/curriculum.js';
 import { Tutor } from '../src/tutor.js';
 import { createTeacher, qwenSettings, checkDecision, normalizeDecision, DECISION_SCHEMA, INTENTS, QWEN_DEFAULT_MODEL, QWEN_DEFAULT_BASE_URL } from '../src/teacher.js';
@@ -78,6 +78,26 @@ test('the decision schema carries structured lesson state', () => {
   for (const i of ['answer', 'uncertain', 'hint_request', 'explain_request', 'question', 'pronunciation_question', 'practice_again', 'roleplay_request', 'continue']) {
     assert.ok(INTENTS.includes(i), i);
   }
+});
+
+test('practical usage: the sentence step teaches usage first, with the stored example that contains the exact term', async () => {
+  const { db, tutor, teacher } = setup();
+  const entry = entryAt(db, 'vol1', 1);
+  await tutor.start();
+  assert.equal(last(teacher).current_entry.practical_usage, null, 'nothing stored yet: the teacher writes its own');
+  saveListenContent(db, entry.id, { sentence_zh: '我们需要给你做硬膜外麻醉。', sentence_en: 'We need to give you an epidural.', usage_en: 'Used in labour and surgery.', context_en: 'An anaesthetist explains pain relief.' }, 'test');
+  teacher.next(done(), done());
+  await tutor.message('硬膜外', voice); // pronounce done
+  await tutor.message('an injection into the spine', { source: 'voice' }); // meaning done -> sentence next
+  const ctx = last(teacher);
+  assert.equal(ctx.if_complete.then, 'exercise "sentence"');
+  assert.equal(ctx.lesson_state.exercise, 'meaning');
+  assert.match(ctx.if_complete.instruction, /practical usage/);
+  assert.match(ctx.if_complete.instruction, /exact term/);
+  assert.deepEqual(ctx.current_entry.practical_usage, { sentence_zh: '我们需要给你做硬膜外麻醉。', sentence_en: 'We need to give you an epidural.', usage_en: 'Used in labour and surgery.', context_en: 'An anaesthetist explains pain relief.' });
+  await tutor.message('随便说说', voice);
+  assert.equal(last(teacher).lesson_state.exercise, 'sentence');
+  assert.match(last(teacher).lesson_state.exercise_goal, /Only his own sentence completes/);
 });
 
 test('session start sends the teacher the entry and lesson state; mic language is Mandarin', async () => {
