@@ -14,7 +14,7 @@
 // stored), and the next listen tries Qwen again. The curriculum itself is
 // never changed.
 import OpenAI from 'openai';
-import { qwenSettings } from './teacher.js';
+import { qwenSettings, qwenClient } from './teacher.js';
 
 const HAN = /\p{Script=Han}/u;
 const MAX_SENTENCE_CHARS = 40;
@@ -68,7 +68,7 @@ export function templateContent(entry) {
 export function createListenWriter({ client, env = process.env, log = console } = {}) {
   const q = qwenSettings(env);
   const configured = Boolean(client || q.apiKey);
-  const api = configured ? client ?? new OpenAI({ apiKey: q.apiKey, baseURL: q.baseURL }) : null;
+  const api = configured ? client ?? qwenClient(q) : null;
   return {
     configured,
     model: q.model,

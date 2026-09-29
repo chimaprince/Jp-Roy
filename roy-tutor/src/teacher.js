@@ -124,7 +124,14 @@ export function qwenSettings(env = process.env) {
     model: env.QWEN_MODEL || QWEN_DEFAULT_MODEL,
     baseURL: env.QWEN_BASE_URL || QWEN_DEFAULT_BASE_URL,
     enableThinking: /^(1|true|yes)$/i.test(env.QWEN_ENABLE_THINKING || ''),
+    // A voice lesson cannot wait minutes for a reply (the SDK default is 10 min).
+    timeoutMs: Number(env.QWEN_TIMEOUT_MS) > 0 ? Number(env.QWEN_TIMEOUT_MS) : 30_000,
   };
+}
+
+// The HTTP client for Qwen's OpenAI-compatible API, with a bounded timeout.
+export function qwenClient(q) {
+  return new OpenAI({ apiKey: q.apiKey, baseURL: q.baseURL, timeout: q.timeoutMs, maxRetries: 1 });
 }
 
 // Checks a reply against DECISION_SCHEMA (used when the provider only
@@ -282,7 +289,7 @@ export function createTeacher({ client, log = console, env = process.env } = {})
   if (!client && !q.apiKey) {
     return { configured: false, ...info, async decide() { throw new TeacherNotConfigured(); } };
   }
-  const api = client ?? new OpenAI({ apiKey: q.apiKey, baseURL: q.baseURL });
+  const api = client ?? qwenClient(q);
   // JSON mode with the schema in the prompt; every reply is checked below.
   const system = SYSTEM_PROMPT + JSON_INSTRUCTIONS;
 
@@ -297,7 +304,7 @@ export function createTeacher({ client, log = console, env = process.env } = {})
     });
     const choice = completion.choices[0];
     log.log(`[teacher] <- Qwen id=${completion.id} model=${completion.model} finish=${choice.finish_reason} ${Date.now() - started}ms tokens=${completion.usage?.total_tokens ?? '?'}`);
-    if (choice.finish_reason === 'length') throw new Error('The AI teacher reply was cut off (token limit).');
+    if (choice.finish_reason === 'length') throw Object.assign(new Error('The AI teacher reply was cut off (token limit).'), { code: 'ai_bad_reply' });
     return choice.message.content ?? '';
   }
 
@@ -325,7 +332,7 @@ export function createTeacher({ client, log = console, env = process.env } = {})
         log.warn(`[teacher]    reply did not match the schema (${problems.slice(0, 3).join('; ')}); asking once more`);
         text = await call([...messages, { role: 'assistant', content: text }, { role: 'user', content: `That reply did not match the required JSON schema: ${problems.join('; ')}. Use only the allowed values from the field guide. Send the corrected JSON object only.` }]);
         ({ decision, problems } = read(text));
-        if (problems.length) throw new Error(`The AI teacher's reply did not match the lesson schema: ${problems.join('; ')}`);
+        if (problems.length) throw Object.assign(new Error(`The AI teacher's reply did not match the lesson schema: ${problems.join('; ')}`), { code: 'ai_bad_reply' });
       }
       log.log(`[teacher]    intent=${decision.intent} correct=${decision.correct} exercise_complete=${decision.exercise_complete} next=${decision.next_action}`);
       return decision;

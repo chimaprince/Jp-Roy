@@ -71,14 +71,26 @@ CREATE TABLE IF NOT EXISTS listen_content (
   created_at TEXT NOT NULL
 );
 
--- Listen & Learn: words whose whole lesson has finished playing. Separate from
--- entry_progress: listening never completes a word in Interactive Practice.
-CREATE TABLE IF NOT EXISTS listen_progress (
+-- Listen & Learn: one row each time a word's whole lesson finished playing.
+-- review = 1 for a review lesson. The study date lets the next day's review
+-- include words learnt by listening.
+CREATE TABLE IF NOT EXISTS listen_log (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id     TEXT NOT NULL REFERENCES users(id),
   entry_id    INTEGER NOT NULL REFERENCES curriculum(id),
-  times       INTEGER NOT NULL DEFAULT 0,
+  study_date  TEXT NOT NULL,
   finished_at TEXT NOT NULL,
-  PRIMARY KEY (user_id, entry_id)
+  review      INTEGER NOT NULL DEFAULT 0,
+  completed   INTEGER NOT NULL DEFAULT 0 -- 1: this listen completed the word (it was Roy's current word)
+);
+CREATE INDEX IF NOT EXISTS listen_log_user_date ON listen_log (user_id, study_date);
+
+-- Listen & Learn: the day its review block last finished (once per day).
+CREATE TABLE IF NOT EXISTS listen_state (
+  user_id          TEXT NOT NULL REFERENCES users(id),
+  course_id        TEXT NOT NULL REFERENCES courses(id),
+  review_done_date TEXT,
+  PRIMARY KEY (user_id, course_id)
 );
 `;
 
@@ -212,25 +224,35 @@ export function saveListenContent(db, entryId, content, model, now = new Date().
   db.prepare('INSERT OR REPLACE INTO listen_content (entry_id, content, model, created_at) VALUES (?, ?, ?, ?)').run(entryId, JSON.stringify(content), model ?? null, now);
 }
 
-export function markListened(db, userId, entryId, now = new Date().toISOString()) {
-  db.prepare(`INSERT INTO listen_progress (user_id, entry_id, times, finished_at) VALUES (?, ?, 1, ?)
-    ON CONFLICT(user_id, entry_id) DO UPDATE SET times = times + 1, finished_at = excluded.finished_at`).run(userId, entryId, now);
+export function logListen(db, { userId, entryId, studyDate, review = false, completed = false, now = new Date().toISOString() }) {
+  db.prepare('INSERT INTO listen_log (user_id, entry_id, study_date, finished_at, review, completed) VALUES (?, ?, ?, ?, ?, ?)')
+    .run(userId, entryId, studyDate, now, review ? 1 : 0, completed ? 1 : 0);
 }
 
-// Where Listen & Learn continues: the first word, in curriculum order, whose
-// lesson has not finished yet (a skipped word stays unfinished).
-export function listenPosition(db, userId, courseId) {
-  const row = db.prepare(`SELECT MIN(c.position) AS position FROM curriculum c
-    LEFT JOIN listen_progress l ON l.entry_id = c.id AND l.user_id = ?
-    WHERE c.course_id = ? AND l.entry_id IS NULL`).get(userId, courseId);
-  return row?.position ?? null; // null: every word listened to
+// Words whose whole (non-review) lesson was listened to on a study date.
+export function listenedEntryIds(db, userId, courseId, studyDate) {
+  return db.prepare(`SELECT l.entry_id AS id FROM listen_log l JOIN curriculum c ON c.id = l.entry_id
+    WHERE l.user_id = ? AND c.course_id = ? AND l.study_date = ? AND l.review = 0
+    GROUP BY l.entry_id ORDER BY MIN(l.id)`)
+    .all(userId, courseId, studyDate).map((r) => r.id);
+}
+
+// The last date before `date` on which Roy listened to a lesson, or null.
+export function lastListenDateBefore(db, userId, courseId, date) {
+  return db.prepare(`SELECT MAX(l.study_date) AS d FROM listen_log l JOIN curriculum c ON c.id = l.entry_id
+    WHERE l.user_id = ? AND c.course_id = ? AND l.study_date < ?`).get(userId, courseId, date)?.d ?? null;
 }
 
 export function listenedCount(db, userId, courseId) {
-  return db.prepare(`SELECT COUNT(*) AS n FROM listen_progress l JOIN curriculum c ON c.id = l.entry_id
-    WHERE l.user_id = ? AND c.course_id = ?`).get(userId, courseId).n;
+  return db.prepare(`SELECT COUNT(DISTINCT l.entry_id) AS n FROM listen_log l JOIN curriculum c ON c.id = l.entry_id
+    WHERE l.user_id = ? AND c.course_id = ? AND l.review = 0`).get(userId, courseId).n;
 }
 
-export function wasListened(db, userId, entryId) {
-  return Boolean(db.prepare('SELECT 1 FROM listen_progress WHERE user_id = ? AND entry_id = ?').get(userId, entryId));
+export function listenReviewDoneDate(db, userId, courseId) {
+  return db.prepare('SELECT review_done_date AS d FROM listen_state WHERE user_id = ? AND course_id = ?').get(userId, courseId)?.d ?? null;
+}
+
+export function setListenReviewDone(db, userId, courseId, date) {
+  db.prepare(`INSERT INTO listen_state (user_id, course_id, review_done_date) VALUES (?, ?, ?)
+    ON CONFLICT(user_id, course_id) DO UPDATE SET review_done_date = excluded.review_done_date`).run(userId, courseId, date);
 }

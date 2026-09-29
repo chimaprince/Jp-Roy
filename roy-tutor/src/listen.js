@@ -34,13 +34,16 @@ const singleReading = (char) => (polyphonic(char, { type: 'array' })[0] ?? []).l
 
 // Kinds of step that must be in every lesson (tests check these).
 export const REQUIRED_STEPS = ['term', 'pinyin', 'english', 'meaning', 'usage', 'sentence', 'sentence-en', 'context', 'repeat'];
+// A review lesson (start of a new study day) is the short version.
+export const REVIEW_STEPS = ['term', 'pinyin', 'english', 'sentence', 'sentence-en', 'repeat'];
 
 /**
  * @param entry    curriculum entry
  * @param total    number of entries in the course
  * @param content  { sentence_zh, sentence_en, usage_en, context_en, source: 'teacher'|'template' }
+ * @param review   true: the short review version
  */
-export function listenLesson(entry, total, content) {
+export function listenLesson(entry, total, content, { review = false } = {}) {
   const term = String(entry.mandarin || '').trim();
   const pinyin = String(entry.pinyin || '').trim();
   const english = String(entry.english || '').trim();
@@ -49,6 +52,25 @@ export function listenLesson(entry, total, content) {
   const steps = [];
   const add = (kind, lang, text, show, source, extra = {}) => { if (text) steps.push({ kind, lang, text, show, source, ...extra }); };
   const withPinyin = pinyin ? `${term}  ${pinyin}` : `${term}  (no pinyin in the source)`;
+
+  const lesson = (steps) => ({
+    position: entry.position,
+    total,
+    card: { position: entry.position, mandarin: entry.mandarin, pinyin: entry.pinyin || null, english: entry.english, meaning: entry.meaning ?? null, sourcePage: entry.source_page ?? null },
+    example: { sentence_zh: content.sentence_zh, sentence_en: content.sentence_en, source: from },
+    steps,
+  });
+
+  if (review) {
+    add('intro', 'en', `Review: word ${entry.position}.`, `Review · Word ${entry.position}`, 'curriculum');
+    add('term', 'zh', term, withPinyin, 'curriculum');
+    add('pinyin', 'zh', term, withPinyin, 'curriculum', { rate: 0.8 });
+    add('english', 'en', english ? `In English: ${english}.` : 'In English: not given in the source.', english || '(no English in the source)', 'curriculum');
+    add('sentence', 'zh', content.sentence_zh, content.sentence_zh, from);
+    add('sentence-en', 'en', `That means: ${content.sentence_en}`, `${content.sentence_zh}\n${content.sentence_en}`, from);
+    add('repeat', 'zh', term, withPinyin, 'curriculum', { rate: 0.9 });
+    return lesson(steps);
+  }
 
   add('intro', 'en', `Word ${entry.position} of ${total}.`, `Word ${entry.position} of ${total}`, 'curriculum');
   add('term', 'zh', term, withPinyin, 'curriculum');
@@ -69,11 +91,5 @@ export function listenLesson(entry, total, content) {
   add('repeat-intro', 'en', english ? `Once more, ${english}:` : 'Once more:', withPinyin, 'curriculum');
   add('repeat', 'zh', term, withPinyin, 'curriculum', { rate: 0.9 });
 
-  return {
-    position: entry.position,
-    total,
-    card: { position: entry.position, mandarin: entry.mandarin, pinyin: entry.pinyin || null, english: entry.english, meaning: entry.meaning ?? null, sourcePage: entry.source_page ?? null },
-    example: { sentence_zh: content.sentence_zh, sentence_en: content.sentence_en, source: from },
-    steps,
-  };
+  return lesson(steps);
 }

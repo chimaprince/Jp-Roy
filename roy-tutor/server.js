@@ -5,7 +5,7 @@ import OpenAI from 'openai'; // HTTP client for Qwen's OpenAI-compatible API (er
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { openDb, activeCourse, entryAt, getListenContent, saveListenContent, markListened, listenPosition, listenedCount } from './src/db.js';
+import { openDb, activeCourse, entryAt, getListenContent, saveListenContent } from './src/db.js';
 import { loadConfiguredCourses } from './src/curriculum.js';
 import { createTeacher } from './src/teacher.js';
 import { Tutor } from './src/tutor.js';
@@ -121,12 +121,11 @@ const routes = {
   'POST /api/session/end': async () => withVoice(await tutor.end()),
 };
 
-// Listen & Learn. Read-only for lessons: no session, no Interactive Practice
-// progress, no microphone. The only write is the listening record, and only
-// when the page reports that a word's whole lesson has finished playing.
-const USER_ID = process.env.TUTOR_USER_ID || 'roy';
+// Listen & Learn. It shares Roy's curriculum position with Interactive
+// Practice (see Tutor.listenPlan / completeByListening). Fetching a lesson
+// changes nothing; only a report that a whole lesson finished playing does.
 const listenWriter = createListenWriter();
-const writing = new Map(); // entry id -> pending example, so one word is written once
+const writing = new Map(); // entry id -> pending example, so each word is written once
 
 async function listenContent(entry, { generate }) {
   const saved = getListenContent(db, entry.id);
@@ -141,43 +140,56 @@ async function listenContent(entry, { generate }) {
   return writing.get(entry.id);
 }
 
-function listenPlace(course) {
-  const total = tutor.status().total;
-  return { listenPosition: listenPosition(db, USER_ID, course.id), listened: listenedCount(db, USER_ID, course.id), total };
-}
+const badRequest = (message) => Object.assign(new Error(message), { status: 400 });
 
-function listenCourse() {
-  const course = activeCourse(db);
-  if (!course) throw Object.assign(new Error('No curriculum is loaded.'), { status: 404 });
-  return course;
-}
-
-function wordAt(course, raw, fallback) {
-  const total = tutor.status().total;
-  const position = raw === null || raw === undefined ? fallback : Number(raw);
-  if (!Number.isInteger(position) || position < 1 || position > total) throw Object.assign(new Error(`Word ${raw} is not in the curriculum (1-${total}).`), { status: 400 });
-  return entryAt(db, course.id, position);
-}
-
-// GET /api/listen?position=N  the lesson for word N (default: where listening
-// continues), with Qwen TTS audio per step. ?audio=0: text only, nothing generated.
+// GET /api/listen                 what to play now: the first review lesson of
+//                                 a new study day, else Roy's current word
+// GET /api/listen?position=N      word N (&review=1 for its review lesson)
+// ?audio=0                        text only, nothing generated or synthesised
+// Each lesson says what follows it (`next`), so the page plays on by itself.
 async function listenRoute(url) {
-  const course = listenCourse();
-  const place = listenPlace(course);
-  const entry = wordAt(course, url.searchParams.get('position'), place.listenPosition ?? 1);
+  const plan = tutor.listenPlan();
+  if (!plan) throw Object.assign(new Error('No curriculum is loaded.'), { status: 404 });
+  const course = activeCourse(db);
+  const raw = url.searchParams.get('position');
+  let position;
+  let review;
+  if (raw === null) {
+    review = plan.review.length > 0;
+    position = review ? plan.review[0] : plan.position ?? plan.total;
+  } else {
+    position = Number(raw);
+    review = url.searchParams.get('review') === '1' && plan.review.includes(position);
+  }
+  if (!Number.isInteger(position) || position < 1 || position > plan.total) throw badRequest(`Word ${raw} is not in the curriculum (1-${plan.total}).`);
+  const entry = entryAt(db, course.id, position);
   const textOnly = url.searchParams.get('audio') === '0';
   const content = await listenContent(entry, { generate: !textOnly });
-  const lesson = { ...listenLesson(entry, place.total, content), ...place, curriculumPosition: tutor.status().position ?? null };
-  return textOnly ? lesson : speech.attachTo(lesson, 'steps');
+  const lesson = listenLesson(entry, plan.total, content, { review });
+  // What plays after this lesson: the next review word, then the current
+  // word; after a word, the one after it (in curriculum order).
+  let next = null;
+  if (review) {
+    const i = plan.review.indexOf(position);
+    next = i + 1 < plan.review.length ? { position: plan.review[i + 1], review: true } : plan.position ? { position: plan.position, review: false } : null;
+  } else if (position < plan.total) {
+    next = { position: position + 1, review: false };
+  }
+  const body = { ...lesson, review, next, reviewCount: plan.review.length, reviewIndex: review ? plan.review.indexOf(position) : null, ...tutor.listenProgress() };
+  return textOnly ? body : speech.attachTo(body, 'steps');
 }
 
-// POST /api/listen/complete {position}  the page played every step of this
-// word's lesson. Listening continues from the first unfinished word.
+// POST /api/listen/complete {position, review}  every step of that lesson
+// played. Completes Roy's current word (shared with Interactive Practice);
+// anything else is only logged. The last review lesson ends the day's review.
 function listenCompleteRoute(body) {
-  const course = listenCourse();
-  const entry = wordAt(course, body?.position, null);
-  markListened(db, USER_ID, entry.id);
-  return { finished: entry.position, ...listenPlace(course) };
+  const position = Number(body?.position);
+  if (!Number.isInteger(position)) throw badRequest('position is required');
+  const plan = tutor.listenPlan();
+  const review = body.review === true && plan.review.includes(position);
+  const result = tutor.completeByListening(position, { review });
+  if (review && plan.review.at(-1) === position) tutor.listenReviewDone();
+  return result;
 }
 
 // The entry the lesson is on now, read from the curriculum (the card hides the
@@ -245,6 +257,12 @@ async function handler(req, res) {
     }
     console.error(err);
     if (err.code === 'ai_not_configured') return send(res, 503, { error: err.message, code: err.code });
+    if (err.code === 'ai_bad_reply') {
+      return send(res, 502, { error: 'The AI teacher (Qwen) sent an unusable reply. Nothing was counted; try again.', code: 'ai_request_failed' });
+    }
+    if (err instanceof OpenAI.APIConnectionTimeoutError) {
+      return send(res, 504, { error: 'The AI teacher (Qwen) took too long to answer. Nothing was counted; try again.', code: 'ai_request_failed' });
+    }
     if (err instanceof OpenAI.APIError) {
       // Do not pass the provider's error text to the browser; the server log has it.
       return send(res, 502, { error: `The AI teacher request failed (status ${err.status ?? 'none'}). Check DASHSCOPE_API_KEY, QWEN_MODEL and QWEN_BASE_URL on the server.`, code: 'ai_request_failed' });

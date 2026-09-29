@@ -127,7 +127,7 @@ function addLog(who, text) {
 
 function renderStatus(status) {
   if (!status?.course) return;
-  $('course').textContent = status.course.title.toUpperCase();
+  if (status.course.title) $('course').textContent = status.course.title.toUpperCase();
   $('progress').textContent = status.finished
     ? `Progress: all ${status.total} words complete`
     : `Progress: Word ${status.position} of ${status.total}`;
@@ -548,9 +548,10 @@ if (!window.isSecureContext) {
   setStatus(VOICE_ERRORS.unsupported);
 }
 // ---------- choosing a mode: Interactive Practice or Listen & Learn ----------
+//
+// Both modes share Roy's curriculum position (JH Medics word 1 → 385).
 
 let learnMode = null; // null (home), 'interactive' or 'listen'
-let curriculumPosition = null;
 let listenedWords = null; // latest count from the server (lessons are fetched ahead, so theirs can be stale)
 
 function notice(text) {
@@ -564,13 +565,20 @@ function showMode(next) {
   $('listen').hidden = next !== 'listen';
   $('mode-interactive').setAttribute('aria-pressed', String(next === 'interactive'));
   $('mode-listen').setAttribute('aria-pressed', String(next === 'listen'));
-  $('stages').closest('.today').hidden = next !== 'interactive';
 }
 
-// The word card for a curriculum position (text only, no audio).
-async function showWord(position) {
+// Home: the progress line and Roy's current word (text only, nothing generated).
+async function showHome() {
   try {
-    const lesson = await api('GET', `/api/listen?audio=0${position ? `&position=${position}` : ''}`);
+    const s = await api('GET', '/api/status');
+    renderStatus(s);
+    if (s.aiConfigured === false) {
+      const msg = 'Qwen is not configured: DASHSCOPE_API_KEY is missing. Set it in roy-tutor/.env on the server and restart the server.';
+      setStatus(msg);
+      notice(msg);
+    }
+    if (!s.course) return;
+    const lesson = await api('GET', `/api/listen?audio=0&position=${Math.min(s.position, s.total)}`);
     renderView({ card: lesson.card, stage: null });
   } catch (err) {
     notice(friendlyError(err));
@@ -588,28 +596,39 @@ function leaveInteractive() {
 $('mode-interactive').addEventListener('click', () => {
   unlockAudio();
   if (learnMode === 'listen') listenPlayer.exit();
+  notice('');
   showMode('interactive');
-  if (!sessionOpen && !BUSY_STATES.has(state)) startSession();
+  // Start, or resume today's session (Listen & Learn may have moved the word on).
+  if (!BUSY_STATES.has(state) && state !== 'listening' && state !== 'speaking') startSession();
 });
 
 $('mode-listen').addEventListener('click', () => {
   unlockAudio(); // this tap lets iPhone Safari play the lesson audio
   leaveInteractive();
+  notice('');
   showMode('listen');
-  // Continue where listening stopped (the server knows the first unfinished word).
-  listenPlayer.open(listenPlayer.view.position ?? undefined);
+  if (listenPlayer.state === 'idle') listenPlayer.open(undefined); // the server picks: review first on a new day, else the current word
+  else listenPlayer.play();
 });
 
 // ---------- Listen & Learn: Qwen TTS lessons, no microphone ----------
 
+const readingTime = (step) => 1500 + String(step.show || step.text).length * 60;
+
+// One step: fetch its Qwen audio from the server and play it. When there is no
+// audio (TTS failed or not configured) the text stays on screen for reading
+// time, and the step counts as failed, so the word is not marked as listened.
 async function playListenStep(step) {
   const run = speechRun;
-  if (!step.audio) {
-    // No teacher voice (TTS not configured or failed): show the text long enough to read.
-    await new Promise((resolve) => setTimeout(resolve, 1500 + String(step.show || step.text).length * 60));
-    return;
+  let url;
+  try {
+    if (!step.audio) throw Object.assign(new Error('No teacher audio for this line.'), { code: 'tts_failed' });
+    url = await fetchAudio(step.audio);
+  } catch (err) {
+    if (err.code === 'network') throw err; // the player pauses; Play retries
+    await pause(readingTime(step));
+    throw err;
   }
-  const url = await fetchAudio(step.audio);
   if (run !== speechRun) { URL.revokeObjectURL(url); return; } // paused while the audio was loading
   try {
     await playUrl(url, playbackRate(step), run);
@@ -621,18 +640,23 @@ async function playListenStep(step) {
 const listenPlayer = new ListenController({
   playStep: playListenStep,
   stopAudio: stopSpeaking,
-  loadLesson: (position) => api('GET', `/api/listen${position ? `?position=${position}` : ''}`),
+  loadLesson: (target) => api('GET', target ? `/api/listen?position=${target.position}${target.review ? '&review=1' : ''}` : '/api/listen'),
   onChange: renderListen,
-  // Only called when every step of a word has played: record it, so listening
-  // continues from the next unfinished word next time.
+  // Only called when every step of a lesson played. Finishing Roy's current
+  // word completes it and moves the shared position on.
   onComplete: async (lesson) => {
-    const place = await api('POST', '/api/listen/complete', { position: lesson.position });
+    const place = await api('POST', '/api/listen/complete', { position: lesson.position, review: Boolean(lesson.review) });
     listenedWords = place.listened;
+    Object.assign(lesson, { currentPosition: place.currentPosition, completedWords: place.completedWords });
+    renderStatus({ course: true, total: place.total, position: place.currentPosition, finished: place.finished });
     renderListen(listenPlayer.view);
   },
   onError: (err) => {
     console.error('[listen]', err);
-    if (err?.code === 'play-blocked') { listenPlayer.pause(); notice(VOICE_ERRORS['play-blocked']); }
+    if (err?.code === 'play-blocked') notice(VOICE_ERRORS['play-blocked']);
+    else if (err?.code === 'network' || err?.name === 'TypeError') notice("Can't reach the tutor server (network). Listening is paused; press ▶ Play when you are connected again.");
+    else if (err?.code === 'tts_failed' && listenPlayer.state === 'paused') notice("The teacher's voice (Qwen) is not available right now. Listening is paused; press ▶ Play to try again.");
+    else if (err?.code !== 'tts_failed') notice(friendlyError(err));
   },
 });
 
@@ -640,9 +664,10 @@ function renderListen(view) {
   const lesson = listenPlayer.lesson;
   if (lesson) {
     renderView({ card: lesson.card, stage: null });
-    const practice = lesson.curriculumPosition ? ` · Interactive Practice: Word ${lesson.curriculumPosition}` : '';
+    const what = lesson.review ? `Review ${lesson.reviewIndex + 1} of ${lesson.reviewCount} · Word ${lesson.position}` : `Word ${lesson.position} of ${lesson.total}`;
+    const place = lesson.currentPosition && lesson.currentPosition !== lesson.position && !lesson.review ? ` · your place: Word ${lesson.currentPosition}` : '';
     const listened = Math.max(listenedWords ?? 0, lesson.listened ?? 0);
-    $('listen-where').textContent = `Listening: Word ${lesson.position} of ${lesson.total} · ${listened} ${listened === 1 ? 'word' : 'words'} listened${practice}`;
+    $('listen-where').textContent = `${what}${place} · ${listened} ${listened === 1 ? 'word' : 'words'} listened`;
   }
   const step = view.step;
   const nowEl = $('listen-now');
@@ -661,24 +686,14 @@ function renderListen(view) {
 
 $('listen-play').addEventListener('click', () => { unlockAudio(); notice(''); listenPlayer.play(); });
 $('listen-pause').addEventListener('click', () => listenPlayer.pause());
-$('listen-repeat').addEventListener('click', () => { unlockAudio(); listenPlayer.repeat(); });
-$('listen-next').addEventListener('click', () => { unlockAudio(); listenPlayer.next(); });
+$('listen-repeat').addEventListener('click', () => { unlockAudio(); notice(''); listenPlayer.repeat(); });
+$('listen-next').addEventListener('click', () => { unlockAudio(); notice(''); listenPlayer.next(); });
 $('listen-exit').addEventListener('click', () => {
   listenPlayer.exit();
   showMode(null);
   notice('');
-  showWord(curriculumPosition); // back to Roy's own place
+  showHome(); // back to Roy's own place
 });
 
 showMode(null);
-api('GET', '/api/status').then((s) => {
-  renderStatus(s);
-  curriculumPosition = s.finished ? s.total : s.position ?? null;
-  if (s.session) renderView(s.session);
-  else showWord(curriculumPosition);
-  if (s.aiConfigured === false) {
-    const msg = 'Qwen is not configured: DASHSCOPE_API_KEY is missing. Set it in roy-tutor/.env on the server and restart the server.';
-    setStatus(msg);
-    notice(msg);
-  }
-}).catch((err) => { setStatus(friendlyError(err)); notice(friendlyError(err)); });
+showHome();

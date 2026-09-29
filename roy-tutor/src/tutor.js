@@ -111,29 +111,31 @@ export class Tutor {
     const progress = store.getProgress(this.db, this.userId, course.id);
     const existing = this.#activeSession(course, progress);
     if (existing && !existing.state.ended) {
-      return this.#turn(course, existing, { event: 'session_resume', details: 'Roy is back later the same day. Welcome him back briefly and pick up the current exercise where it was.' });
+      return this.#turn(course, existing, { event: 'session_resume', details: 'Roy is back later the same day. Welcome him back briefly and pick up the current exercise where it was. If no exercise of the current entry has been done yet (exercises_passed is empty), introduce the entry first (he may have moved on to it in Listen & Learn).' });
     }
 
     const today = localDate(this.now());
     const session = store.createSession(this.db, this.userId, course.id, today, this.now().toISOString());
     session.state = { stage: 'lesson', lesson: null, review: null, suspended: null, roySide: 'Interpreter', transcript: [], ended: false };
-    const prev = store.previousStudySession(this.db, this.userId, course.id, today);
-    const isNewDay = Boolean(progress.last_study_date) && progress.last_study_date < today;
-    let reviewRequired = Boolean(progress.review_required) || (isNewDay && Boolean(prev));
+    const previous = this.#previousMaterial(course, today);
+    // A new study day: nothing studied yet today (listening today does not count
+    // as the day's session), and something to review from before.
+    const isNewDay = !progress.last_study_date || progress.last_study_date < today;
+    let reviewRequired = Boolean(progress.review_required) || (isNewDay && previous.ids.length > 0);
 
     let greeting;
-    if (!progress.last_study_date && !prev) {
+    if (!previous.date && !progress.last_study_date) {
       greeting = `First ever session. Welcome Roy, say this is ${course.title} and that you will go through it in order, then start the current entry.`;
-    } else if (prev) {
-      const studied = this.#entries(prev.words_studied.length ? prev.words_studied : prev.words_reviewed);
-      const yesterday = prev.study_date === localDate(new Date(this.now().getTime() - 864e5));
-      greeting = `Start with: "Welcome back, Roy. ${yesterday ? 'Yesterday' : `Last time (${prev.study_date})`} we studied ${listWords(studied)}." Then continue as the lesson state says.`;
+    } else if (previous.ids.length) {
+      const studied = this.#entries(previous.ids);
+      const yesterday = previous.date === localDate(new Date(this.now().getTime() - 864e5));
+      greeting = `Start with: "Welcome back, Roy. ${yesterday ? 'Yesterday' : `Last time (${previous.date})`} we studied ${listWords(studied)}." Then continue as the lesson state says.`;
     } else {
       greeting = 'Roy is starting a new session. Welcome him back briefly, then continue as the lesson state says.';
     }
 
     if (reviewRequired) {
-      const queue = this.#buildReviewQueue(course, prev);
+      const queue = this.#buildReviewQueue(course, previous);
       if (queue.length) {
         session.state.stage = 'review';
         session.state.review = { queue: queue.slice(1), current: queue[0], attempts: 0, requeued: [] };
@@ -192,6 +194,91 @@ export class Tutor {
     store.updateProgress(this.db, this.userId, course.id, { last_session: session.id });
     const say = farewell.length ? farewell : [{ lang: 'en', text: `Good work today, ${this.userName}.` }];
     return { say: [...say, { lang: 'en', text: `${session.summary} Your place is saved.` }], listen: null, ended: true, status: this.status() };
+  }
+
+  // ---------- Listen & Learn: shares the curriculum position ----------
+
+  // What Listen & Learn plays now: on a new study day, short reviews of the
+  // previous day's words (and weak words) first, then Roy's current word.
+  listenPlan() {
+    const course = store.activeCourse(this.db);
+    if (!course) return null;
+    const progress = store.getProgress(this.db, this.userId, course.id);
+    const total = store.courseLength(this.db, course.id);
+    const today = localDate(this.now());
+    const position = progress.current_position <= total ? progress.current_position : null;
+    let review = [];
+    const isNewDay = !progress.last_study_date || progress.last_study_date < today;
+    const reviewedToday = store.listenReviewDoneDate(this.db, this.userId, course.id) === today || Boolean(this.#activeSession(course, progress));
+    if (isNewDay && !reviewedToday) {
+      const previous = this.#previousMaterial(course, today);
+      if (previous.ids.length) review = this.#buildReviewQueue(course, previous).map((id) => store.entryById(this.db, id).position);
+    }
+    return { position, total, review, today };
+  }
+
+  // A Listen & Learn lesson finished playing (every step). Finishing Roy's
+  // current word completes it, like Interactive Practice does, and moves the
+  // shared position to the next word. A word reached by skipping ahead, an
+  // earlier word, or a review lesson is only logged: it never moves the place.
+  completeByListening(position, { review = false } = {}) {
+    const course = store.activeCourse(this.db);
+    const entry = course && store.entryAt(this.db, course.id, position);
+    if (!entry) throw Object.assign(new Error(`Word ${position} is not in the curriculum.`), { status: 400 });
+    const progress = store.getProgress(this.db, this.userId, course.id);
+    const nowIso = this.now().toISOString();
+    const completes = !review && progress.current_position === entry.position;
+    if (completes) {
+      const ep = store.getEntryProgress(this.db, this.userId, entry.id);
+      store.updateEntryProgress(this.db, this.userId, entry.id, {
+        completed: 1,
+        times_practiced: ep.times_practiced + 1,
+        last_reviewed: nowIso,
+        confidence: Math.max(ep.confidence, 1), // heard, not yet practised aloud
+      });
+      store.updateProgress(this.db, this.userId, course.id, { current_position: entry.position + 1 });
+      this.#moveSessionPast(course, progress, entry);
+    }
+    store.logListen(this.db, { userId: this.userId, entryId: entry.id, studyDate: localDate(this.now()), review, completed: completes, now: nowIso });
+    return { position: entry.position, completed: completes, ...this.listenProgress() };
+  }
+
+  // The Listen & Learn review block finished (it plays once per study day).
+  listenReviewDone() {
+    const course = store.activeCourse(this.db);
+    if (course) store.setListenReviewDone(this.db, this.userId, course.id, localDate(this.now()));
+  }
+
+  listenProgress() {
+    const course = store.activeCourse(this.db);
+    const progress = store.getProgress(this.db, this.userId, course.id);
+    const total = store.courseLength(this.db, course.id);
+    return {
+      currentPosition: progress.current_position,
+      total,
+      finished: progress.current_position > total,
+      completedWords: store.completedCount(this.db, this.userId, course.id),
+      listened: store.listenedCount(this.db, this.userId, course.id),
+    };
+  }
+
+  // Today's Interactive Practice session was on the word just completed by
+  // listening: move it on to the next word (also inside a paused side trip).
+  #moveSessionPast(course, progress, entry) {
+    const session = this.#activeSession(course, progress);
+    if (!session || session.state.ended) return;
+    const s = session.state;
+    let changed = false;
+    if (s.stage === 'lesson' && s.lesson?.entryId === entry.id && !s.lesson.jump) {
+      this.#resumeCurriculum(course, session);
+      changed = true;
+    }
+    if (s.suspended?.lesson?.entryId === entry.id) {
+      const next = store.entryAt(this.db, course.id, entry.position + 1);
+      s.suspended.lesson = next ? newLesson(next.id, false) : null;
+      changed = true;
+    }
+    if (changed) store.saveSession(this.db, session);
   }
 
   // ---------- one turn: context → AI teacher → apply decision ----------
@@ -495,9 +582,20 @@ export class Tutor {
     session.state.lesson = newLesson(entry.id, false);
   }
 
-  #buildReviewQueue(course, prev) {
+  // What Roy studied on his last study day before today: the words of that
+  // day's Interactive Practice session and the words he learnt by listening.
+  #previousMaterial(course, today) {
+    const prev = store.previousStudySession(this.db, this.userId, course.id, today);
+    const listened = store.lastListenDateBefore(this.db, this.userId, course.id, today);
+    const date = [prev?.study_date, listened].filter(Boolean).sort().at(-1) ?? null;
     const ids = [];
-    if (prev) ids.push(...(prev.words_studied.length ? prev.words_studied : prev.words_reviewed));
+    if (prev && prev.study_date === date) ids.push(...(prev.words_studied.length ? prev.words_studied : prev.words_reviewed));
+    if (date) ids.push(...store.listenedEntryIds(this.db, this.userId, course.id, date));
+    return { date, ids: [...new Set(ids)] };
+  }
+
+  #buildReviewQueue(course, previous) {
+    const ids = [...previous.ids];
     for (const e of store.weakEntries(this.db, this.userId, course.id, WEAK_LIMIT)) ids.push(e.id);
     return [...new Set(ids)].slice(0, REVIEW_LIMIT);
   }
