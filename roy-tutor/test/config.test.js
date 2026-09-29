@@ -162,3 +162,42 @@ test('server startup: .env model is used and logged with its protocol', async ()
   assert.match(out, /teacher voice: Qwen qwen3-tts-instruct-flash/, 'TTS unchanged');
   assert.doesNotMatch(out, /test-key-not-real/);
 });
+
+test('check-voice reads the key from the .env file (like the server), reports both HTTP 200s, never prints the key', async () => {
+  const wav = Buffer.from(encodeWav(Float32Array.from({ length: 24000 }, (_, i) => 0.2 * Math.sin(i / 10)), 24000));
+  const auth = new Set();
+  const http = await import('node:http');
+  const server = http.createServer(async (req, res) => {
+    let raw = '';
+    for await (const c of req) raw += c;
+    if (req.headers.authorization) auth.add(req.headers.authorization);
+    const json = (b) => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(b)); };
+    if (req.url === '/api/v1/services/aigc/multimodal-generation/generation') {
+      const body = JSON.parse(raw);
+      return body.model.includes('tts') ? json({ output: { audio: { data: wav.toString('base64') } } }) : json({ output: { text: '硬膜外。医生说：我们需要打硬膜外。' } });
+    }
+    res.writeHead(404); res.end();
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const key = 'sk-only-in-the-env-file-424242';
+  const { file, dir } = tempEnv(`DASHSCOPE_API_KEY=${key}\nQWEN_ASR_MODEL=qwen-audio-3.1-asr-flash\nQWEN_ASR_BASE_URL=${base}/compatible-mode/v1\nQWEN_TTS_URL=${base}/api/v1/services/aigc/multimodal-generation/generation\n`);
+  try {
+    // The shell has no key at all: it can only come from the file.
+    const out = await run(['scripts/check-voice.mjs'], { ...cleanEnv(), TUTOR_ENV_FILE: file });
+    assert.ok(out.includes(`DASHSCOPE_API_KEY: detected (value hidden) from ${file}`), out);
+    assert.match(out, /TTS HTTP status: 200/);
+    assert.match(out, /OK {2}playable in the browser: WAV pcm/);
+    assert.match(out, /ASR HTTP status: 200/);
+    assert.match(out, /ASR transcript: 硬膜外。医生说：我们需要打硬膜外。/);
+    assert.match(out, /All voice checks passed\./);
+    assert.ok(!out.includes(key), 'the key is never printed');
+    assert.deepEqual([...auth], [`Bearer ${key}`], 'sent only as the Authorization header');
+    fs.rmSync(path.join(appDir, 'voice-check.wav'), { force: true });
+
+    const missing = await run(['scripts/check-voice.mjs'], { ...cleanEnv(), TUTOR_ENV_FILE: path.join(dir, 'nope.env') });
+    assert.match(missing, /DASHSCOPE_API_KEY is missing\. Env file loaded: none \(looked for: .*nope\.env\)/);
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+});

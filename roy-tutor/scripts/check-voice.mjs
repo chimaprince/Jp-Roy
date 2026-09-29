@@ -8,7 +8,8 @@
 //    and no file is given, ASR gets a short silent clip, which checks that
 //    ASR answers and accepts the key.
 // No microphone or browser needed. Never prints the API key.
-import { envFile, envProblems, envNotices, envSource } from '../src/env.js';
+// The same .env loading as the server (must stay the first import).
+import { envFile, envProblems, envNotices, envSource, DEFAULT_CANDIDATES } from '../src/env.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -33,9 +34,12 @@ console.log(`TTS style:    ${voice.ttsInstructions}`);
 const asrProblem = asrEndpointProblem(voice.asrURL);
 if (asrProblem) console.error(`!!  ${asrProblem}`);
 if (!voice.configured) {
-  console.error('!! DASHSCOPE_API_KEY is missing (roy-tutor/.env).');
+  const looked = process.env.TUTOR_ENV_FILE ? [process.env.TUTOR_ENV_FILE] : DEFAULT_CANDIDATES;
+  console.error(`!! DASHSCOPE_API_KEY is missing. Env file loaded: ${envFile ?? 'none'} (looked for: ${looked.join(', ')}).`);
   process.exit(1);
 }
+// Like the server's startup log: where the key came from, never its value.
+console.log(`DASHSCOPE_API_KEY: detected (value hidden) from ${envSource('DASHSCOPE_API_KEY') === '.env' ? envFile : 'the shell environment'}`);
 const report = (err) => `${err.code ?? ''} ${err.message}${err.detail ? `\n     detail: ${err.detail}` : ''}`;
 let failures = 0;
 
