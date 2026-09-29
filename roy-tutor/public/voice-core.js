@@ -260,6 +260,8 @@ export class ListenController {
       steps: steps.length,
       step: steps[Math.min(this.index, steps.length - 1)] ?? null,
       canNext: Boolean(this.lesson?.next),
+      next: this.lesson?.next ?? null,
+      loadingTarget: this.state === 'loading' ? this.loadingTarget ?? null : null,
     };
   }
 
@@ -290,6 +292,7 @@ export class ListenController {
   async open(target) {
     const run = ++this.run;
     this.stopAudio();
+    this.loadingTarget = target ?? null; // what is being loaded (for the status line)
     this.#set('loading');
     let lesson;
     try {
@@ -393,11 +396,21 @@ export class ListenController {
   }
 }
 
-export const LISTEN_STATE_TEXT = {
-  idle: '',
-  loading: 'Preparing the lesson…',
-  playing: 'Playing',
-  paused: 'Paused. ▶ Play to continue.',
-  gap: 'Next word coming up…',
-  finished: 'That was the last word of JH Medics Volume 1.',
-};
+// The Listen & Learn status line. Continuous listening: after a word, the
+// next one starts by itself, and the line says so.
+const wordName = (t) => (t ? `${t.review ? 'review of ' : ''}Word ${t.position}` : 'the lesson');
+export function listenStatusText(view) {
+  const here = view.position ? `${view.review ? 'Review of ' : ''}Word ${view.position}` : '';
+  switch (view.state) {
+    case 'loading': return view.loadingTarget ? `Starting ${wordName(view.loadingTarget)}…` : 'Preparing the lesson…';
+    case 'playing': return `Playing ${here} · ${view.index + 1} of ${view.steps}`;
+    case 'gap': return `Completed ${here}. Starting ${wordName(view.next)}…`;
+    case 'paused': return here ? `Paused at ${here}. ▶ Play to continue.` : 'Paused. ▶ Play to continue.';
+    case 'finished': return `Completed ${here}. That was the last word of JH Medics Volume 1.`;
+    default: return '';
+  }
+}
+
+// Version of the page code; the server reports its own (package.json). A
+// difference means an old page or an old server process: reload / restart.
+export const CLIENT_VERSION = '1.0.1';

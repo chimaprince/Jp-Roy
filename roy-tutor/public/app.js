@@ -12,7 +12,7 @@
 import {
   recognitionLang, LANGUAGE_LABEL, otherLanguage, lessonStateText, friendlyError, VOICE_ERRORS,
   STATES, BUSY_STATES, pickRecorderType, uploadType, toMono, resample, encodeWav, silentWav,
-  SilenceDetector, rms, lineText, playbackRate, ListenController, LISTEN_STATE_TEXT,
+  SilenceDetector, rms, lineText, playbackRate, ListenController, listenStatusText, CLIENT_VERSION,
 } from './voice-core.js';
 
 const $ = (id) => document.getElementById(id);
@@ -575,6 +575,11 @@ async function showHome() {
   try {
     const s = await api('GET', '/api/status');
     renderStatus(s);
+    $('version').textContent = `v${CLIENT_VERSION}`;
+    if (s.version && s.version !== CLIENT_VERSION) {
+      notice(`This page (v${CLIENT_VERSION}) and the server (v${s.version}) are different versions. Stop the server, run "git pull" and "npm install", start it again, then reload this page.`);
+      return;
+    }
     if (s.aiConfigured === false) {
       const msg = 'Qwen is not configured: DASHSCOPE_API_KEY is missing. Set it in roy-tutor/.env on the server and restart the server.';
       setStatus(msg);
@@ -682,7 +687,7 @@ function renderListen(view) {
   $('listen-source').textContent = step?.source === 'teacher' ? 'Example written by the AI teacher (not from JH Medics)'
     : step?.source === 'template' ? 'Simple example (the AI teacher was unavailable)' : '';
   $('listen-state').dataset.state = view.state;
-  $('listen-state').textContent = view.state === 'playing' && view.steps ? `Playing ${view.index + 1} of ${view.steps}` : LISTEN_STATE_TEXT[view.state];
+  $('listen-state').textContent = listenStatusText(view);
   $('listen-play').disabled = view.state === 'playing' || view.state === 'loading';
   $('listen-pause').disabled = !['playing', 'gap', 'loading'].includes(view.state);
   $('listen-repeat').disabled = !lesson || view.state === 'loading';

@@ -110,7 +110,7 @@ const serial = (fn) => (queue = queue.then(fn, fn));
 const withVoice = (result) => speech.attach(result);
 
 const routes = {
-  'GET /api/status': () => ({ ...tutor.status(), voice: { configured: voice.configured, asrModel: voice.asrModel, ttsModel: voice.ttsModel } }),
+  'GET /api/status': () => ({ ...tutor.status(), version: pkg.version, voice: { configured: voice.configured, asrModel: voice.asrModel, ttsModel: voice.ttsModel } }),
   'POST /api/session/start': async () => withVoice(await tutor.start()),
   'POST /api/session/message': async (body) => withVoice(await tutor.message(String(body.text ?? '').slice(0, 500), {
     source: body.source === 'voice' ? 'voice' : 'text',

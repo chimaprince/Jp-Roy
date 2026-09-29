@@ -223,6 +223,15 @@ Controls: **▶ Play / ⏸ Pause** (Play resumes the interrupted step), **↻ Re
 **Exit Listen Mode**. The next lesson is fetched while the current one plays, and
 each line is synthesised once and reused.
 
+Play is continuous: when the last line of a word's audio has finished, that word
+is recorded as completed and the next one starts by itself. The status line
+shows "Completed Word 1. Starting Word 2…". Nothing advances while a lesson is
+loading, if its audio failed, or while paused.
+
+The page shows its version at the bottom (for example `v1.0.1`). If the page and
+the server differ, a notice says so. Stop the server, `git pull`,
+`npm install`, start it again and reload the page.
+
 On a new study day, Listen & Learn first plays short reviews of the previous
 day's words (word, pinyin, English, sentence, translation, word), once per day,
 then continues with Roy's current word.
@@ -280,7 +289,11 @@ servers that check every request. The tests cover:
 - **Progress:** sequential order, completion, resume, review, the shared position,
   no false completion.
 - **Listen & Learn:** every section for all 385 words, validated examples and
-  fallback, auto-advance, Next, Repeat, Pause/Resume, network pause.
+  fallback, auto-advance, Next, Repeat, Pause/Resume, network pause. Continuous
+  play is also tested against the real server (`test/listen-flow.test.js`) and in
+  real Chromium (`test/browser.test.js`, which clicks Listen & Learn once and
+  expects Word 1 → 2 → 3 with no further clicks; it is skipped only if
+  Playwright is not installed).
 - **Voice:** ASR and TTS requests, server-side audio, no browser speech APIs, the
   key never reaching the browser.
 - **Phone:** HTTPS certificates, LAN binding, the setup page, the access code.
