@@ -12,7 +12,7 @@ import { Tutor } from './src/tutor.js';
 import { serverUrls } from './src/network.js';
 import { createSetupServer } from './src/devsetup.js';
 import { listenLesson } from './src/listen.js';
-import { createListenWriter, templateContent } from './src/listencontent.js';
+import { createListenWriter, templateContent, isCurrent, CONTENT_VERSION } from './src/listencontent.js';
 import { createVoice, SpeechStore, VoiceError, audioMime, MAX_AUDIO_BYTES, asrEndpointProblem } from './src/voice.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -140,12 +140,15 @@ const writing = new Map(); // entry id -> pending example, so each word is writt
 
 async function listenContent(entry, { generate }) {
   const saved = getListenContent(db, entry.id);
-  if (saved) return saved;
-  if (!generate) return templateContent(entry);
+  if (isCurrent(saved)) return saved;
+  // Nothing stored yet, or stored before explanations existed: the old
+  // sentence is kept (with the plain explanation) until Qwen writes it anew.
+  const fallback = saved ? { ...templateContent(entry), ...saved, v: CONTENT_VERSION, dialogue: [] } : templateContent(entry);
+  if (!generate) return fallback;
   if (!writing.has(entry.id)) {
     writing.set(entry.id, listenWriter.write(entry).then(({ content, source }) => {
       if (source === 'teacher') saveListenContent(db, entry.id, content, listenWriter.model);
-      return content;
+      return source === 'teacher' ? content : fallback;
     }).finally(() => writing.delete(entry.id)));
   }
   return writing.get(entry.id);

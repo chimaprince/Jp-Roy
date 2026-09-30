@@ -12,7 +12,7 @@
 import {
   recognitionLang, LANGUAGE_LABEL, otherLanguage, lessonStateText, friendlyError, VOICE_ERRORS,
   STATES, BUSY_STATES, pickRecorderType, uploadType, toMono, resample, encodeWav, silentWav,
-  SilenceDetector, rms, lineText, playbackRate, ListenController, listenStatusText, CLIENT_VERSION,
+  SilenceDetector, rms, lineText, playbackRate, ListenController, listenStatusText, listenWhereText, CLIENT_VERSION,
 } from './voice-core.js';
 
 const $ = (id) => document.getElementById(id);
@@ -712,19 +712,16 @@ function renderListen(view) {
   const lesson = listenPlayer.lesson;
   if (lesson) {
     renderView({ card: lesson.card, stage: null });
-    const what = lesson.review ? `Review ${lesson.reviewIndex + 1} of ${lesson.reviewCount} · Word ${lesson.position}` : `Word ${lesson.position} of ${lesson.total}`;
-    const current = latestPosition ?? lesson.currentPosition;
-    const place = current && current !== lesson.position && !lesson.review ? ` · your place: Word ${current}` : '';
     const listened = Math.max(listenedWords ?? 0, lesson.listened ?? 0);
-    $('listen-where').textContent = `${what}${place} · ${listened} ${listened === 1 ? 'word' : 'words'} listened`;
+    $('listen-where').textContent = listenWhereText(lesson, latestPosition ?? lesson.currentPosition, listened);
   }
   const step = view.step;
   const nowEl = $('listen-now');
   nowEl.textContent = step ? step.show || step.text : '';
   nowEl.classList.toggle('zh', step?.lang === 'zh');
   nowEl.lang = step?.lang === 'zh' ? 'zh-CN' : 'en';
-  $('listen-source').textContent = step?.source === 'teacher' ? 'Example written by the AI teacher (not from JH Medics)'
-    : step?.source === 'template' ? 'Simple example (the AI teacher was unavailable)' : '';
+  $('listen-source').textContent = step?.source === 'teacher' ? 'Explanation and examples by the AI teacher (the term, pinyin, English and meaning are from JH Medics)'
+    : step?.source === 'template' ? 'Simple example (the AI teacher was unavailable)' : step?.source === 'curriculum' ? 'From JH Medics Volume 1' : '';
   $('listen-state').dataset.state = view.state;
   $('listen-state').textContent = listenStatusText(view);
   $('listen-play').disabled = view.state === 'playing' || view.state === 'loading';

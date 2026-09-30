@@ -429,19 +429,30 @@ const wordName = (t) => (t ? `${t.review ? 'review of ' : ''}Word ${t.position}`
 export function listenStatusText(view) {
   const here = view.position ? `${view.review ? 'Review of ' : ''}Word ${view.position}` : '';
   switch (view.state) {
-    case 'loading': return view.loadingTarget ? `Starting ${wordName(view.loadingTarget)}…` : 'Preparing the lesson…';
+    case 'loading': return view.loadingTarget ? `Preparing ${wordName(view.loadingTarget)} (the teacher's lesson and voice)…` : 'Preparing the lesson…';
     case 'playing': return `Playing ${here} · ${view.index + 1} of ${view.steps}`;
-    case 'gap': return `Completed ${here}. Starting ${wordName(view.next)}…`;
+    case 'gap': return `${here} complete. Moving to ${wordName(view.next)}…`;
     case 'paused':
       if (view.problem === 'audio') return `${here}: this line's audio could not be played, so ${here} is not complete. ▶ Play tries again · → Next skips it.`;
       if (view.problem === 'rate_limited') return `Qwen's voice is busy right now (rate limit), so ${here} is paused, not complete. Wait a moment, then ▶ Play to retry.`;
       if (view.problem === 'not_saved') return `${here} was heard in full but could not be saved. ▶ Play tries again.`;
       return here ? `Paused at ${here}. ▶ Play to continue.` : 'Paused. ▶ Play to continue.';
-    case 'finished': return `Completed ${here}. That was the last word of JH Medics Volume 1.`;
+    case 'finished': return `${here} complete. That was the last word of JH Medics Volume 1.`;
     default: return '';
   }
 }
 
+// Which word is playing, and how it relates to Roy's one shared place in the
+// course (the first word he has not completed yet).
+export function listenWhereText(lesson, place, listened = 0) {
+  const heard = ` · ${listened} ${listened === 1 ? 'word' : 'words'} listened`;
+  if (lesson.review) return `Review ${lesson.reviewIndex + 1} of ${lesson.reviewCount} · Word ${lesson.position} (a word from your last session)${heard}`;
+  const word = `Word ${lesson.position} of ${lesson.total}`;
+  if (!place || place === lesson.position) return `Now teaching: ${word}${heard}`;
+  if (lesson.position > place) return `Now playing: ${word}, ahead of your place · your place stays at Word ${place} (skipped, not completed yet)${heard}`;
+  return `Now playing: ${word} (already completed) · your place: Word ${place}${heard}`;
+}
+
 // Version of the page code; the server reports its own (package.json). A
 // difference means an old page or an old server process: reload / restart.
-export const CLIENT_VERSION = '1.0.4';
+export const CLIENT_VERSION = '1.0.5';

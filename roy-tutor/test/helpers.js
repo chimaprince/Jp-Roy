@@ -54,10 +54,18 @@ export async function startListenQwen({ interactive = null, ttsDelayMs = 0, ttsF
     }
     if (req.url === '/teacher/chat/completions') {
       const body = JSON.parse(raw);
-      if (/listening material/.test(body.messages[0].content)) {
+      if (/You write the teaching layer/.test(body.messages[0].content)) {
         const e = JSON.parse(body.messages[1].content);
         seen.writer.push(e.mandarin);
-        const content = { sentence_zh: `医生说${e.mandarin}需要检查。`, sentence_en: `The doctor said the ${e.english} needs to be checked.`, usage_en: `Doctors use this word when examining the ${e.english}.`, context_en: `A doctor tells a patient, through the interpreter, that the ${e.english} needs to be checked.` };
+        const odd = seen.writer.length % 2 === 1; // every other word gets a mini-dialogue
+        const content = {
+          explanation_en: `In medical communication this term means ${e.english}.`,
+          usage_en: `Doctors use this word when examining the ${e.english}.`,
+          sentence_zh: `医生说${e.mandarin}需要检查。`,
+          sentence_en: `The doctor said the ${e.english} needs to be checked.`,
+          context_en: `A doctor tells a patient, through the interpreter, that the ${e.english} needs to be checked.`,
+          dialogue: odd ? [{ speaker: '医生', zh: `我们要检查${e.mandarin}。`, en: `We need to check the ${e.english}.` }, { speaker: '患者', zh: '好的。', en: 'Okay.' }] : [],
+        };
         return json({ id: 'w', choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: JSON.stringify(content) } }] });
       }
       seen.teacherTurns += 1;

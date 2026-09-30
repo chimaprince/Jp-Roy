@@ -237,33 +237,42 @@ may send (HTTP 429, `Throttling.RateQuota`). The server (`SpeechStore` in
 ## Listen & Learn
 
 Tap **🎧 Listen & Learn**, put the phone down, and listen. Nothing is asked and
-the microphone is never used. For every word:
+the microphone is never used. The teacher teaches each word, then goes on to the
+next word by itself, like a personal medical-Chinese podcast. For every word:
 
-1. the Mandarin term, clearly;
-2. the term again, slowly, with the **pinyin on screen** (pinyin is never sent to
-   the voice: a Mandarin voice reads characters, not letters);
-3. the English;
-4. the JH Medics medical meaning, verbatim;
-5. syllable by syllable (`硬 yìng · 膜 mó · 外 wài`), only when every character has
-   a single reading, so the voice cannot choose a wrong one;
-6. where the term is used in real medical situations;
-7. a sentence that uses the **exact** term, in Mandarin;
-8. its English translation;
-9. a doctor/patient/interpreter situation;
-10. the term once more.
+1. **the term**, slowly (`硬膜外`), with the **pinyin on screen** (`yìng mó wài`).
+   Pinyin is never sent to the voice: the Mandarin voice says the characters;
+2. **the English and a short explanation**: what the term means in medical
+   communication, built on the JH Medics meaning;
+3. **practical usage**: where and how the term is actually used (which
+   situations, departments, conversations);
+4. **an example sentence** in Mandarin that uses the **exact** term
+   (`医生说我们需要打硬膜外。`);
+5. **its English translation**, and a practical situation where an interpreter
+   hears or needs the term;
+6. when it helps, **a short doctor/patient/nurse/interpreter exchange**, in
+   Mandarin, then in English;
+7. **the term once more**, slowly.
 
-After a short pause, the next word starts by itself.
+This is 5 to 7 natural audio segments per word, so a word costs only 4 to 6 Qwen
+TTS requests (the term at the start and the end is the same audio).
 
-- **Where the content comes from:** items 1-5 come from JH Medics. Volume 1 has
-  no example sentences, so the Qwen teacher writes 6-9, once per word, from that
-  entry only (`src/listencontent.js`). They are shown as "Example written by the
-  AI teacher".
-- **Checks on the teacher's example:** the reply must contain the exact term,
-  character for character, be short, and be Mandarin only; the other parts must
-  be English only. An invalid reply gets one correction round.
+- **Where the content comes from:** the term, pinyin, English, meaning and order
+  come from JH Medics Volume 1 and are never changed. JH Medics has no
+  explanations or example sentences, so the Qwen teacher writes items 2-6 (the
+  explanation, usage, sentence, translation, situation and dialogue), once per
+  word, server-side, from that entry only (`src/listencontent.js`). The page
+  labels them "Explanation and examples by the AI teacher", never as JH Medics.
+- **Checks on the teacher's material:** the sentence must contain the exact
+  term, character for character, be short, and be Mandarin only; the English
+  parts must be English only. An invalid reply gets one correction round. A
+  dialogue that fails its checks is dropped (the lesson plays without it).
 - **Storage and fallback:** good material is stored (`listen_content`) and reused.
-  If Qwen fails or is unavailable, a plain template sentence with the exact term
-  is used and not stored, so Qwen is asked again next time.
+  If Qwen fails or is unavailable, a plain template (the JH Medics meaning, and a
+  simple sentence with the exact term) is used and not stored, so Qwen is asked
+  again next time. Material stored by an older version is rewritten once.
+- **Interactive Practice** gets the same material: the teacher uses the stored
+  sentence and dialogue when it teaches practical usage and starts the role-play.
 
 Controls: **▶ Play / ⏸ Pause** (Play resumes the interrupted step), **↻ Repeat**
 (the current word's lesson again), **→ Next** (optional: skip ahead now),
@@ -275,8 +284,14 @@ and audio still arriving after Next is never played.
 Play is continuous. When the last line of a word's audio has played to its end
 (the audio `ended` event, not a timer), that word is recorded as completed and,
 after a short pause, the next one starts by itself. The status line shows
-"Completed Word 1. Starting Word 2…". Pause, Repeat and loading never complete
-or advance anything; Next skips a word without completing it.
+"Word 1 complete. Moving to Word 2…". There is no "press Next" step: Next is
+only there to skip. Pause, Repeat and loading never complete or advance
+anything; Next skips a word without completing it.
+
+The line above the lesson says which word is playing and how it relates to your
+place: "Now teaching: Word 2 of 385", or after a skip "Now playing: Word 3 of 385,
+ahead of your place · your place stays at Word 1 (skipped, not completed yet)".
+The Progress line always shows your one shared place.
 
 If a line's audio cannot be played (Qwen TTS failed, network), the player stops
 on that line: "Word 1: this line's audio could not be played, so Word 1 is not
@@ -284,7 +299,7 @@ complete. ▶ Play tries again · → Next skips it." ▶ Play asks Qwen for tha
 again and carries on. If a finished word cannot be saved, the player also stops
 and ▶ Play saves it.
 
-The page shows its version at the bottom (for example `v1.0.4`). If the page and
+The page shows its version at the bottom (for example `v1.0.5`). If the page and
 the server differ, a notice says so. Stop the server, `git pull`,
 `npm install`, start it again and reload the page.
 
@@ -297,15 +312,19 @@ then continues with Roy's current word.
 There is one position in JH Medics Volume 1, word 1 → 385, shared by both modes.
 
 - **Interactive Practice** completes a word when all four exercises are done.
-- **Listen & Learn** completes Roy's **current** word when every step of its
-  lesson has played to the end. The page reports this (`POST /api/listen/complete`)
-  and the position moves to the next word in both modes. If today's Interactive
+- **The place** is always the first word, in book order, that is not completed.
+- **Listen & Learn** completes a word when every segment of its lesson has
+  played to the end (the audio `ended` event). The page reports this
+  (`POST /api/listen/complete`). Completing the word at the place moves the place
+  on, in both modes, past any words already completed. If today's Interactive
   session was on that word, it moves on too.
 - **No false completion:** fetching a lesson or starting its audio changes
   nothing. A lesson that was skipped, interrupted or had a failed audio step is
   not counted.
-- **No accidental skipping:** words reached with **Next**, earlier words and
-  review lessons are only logged (`listen_log`). They never move the position.
+- **No accidental skipping:** a word skipped with **Next** is not completed, and
+  the place stays on it. Words heard in full after a skip are completed, but the
+  place does not move past the skipped word until it is completed. Earlier words
+  and review lessons are only logged (`listen_log`).
 - **A new study day** (by `TUTOR_TIMEZONE`): Interactive Practice starts with
   "Welcome back, Roy. Yesterday we studied …" and reviews those words, including
   words learnt by listening, plus up to 5 weak words. A missed word is marked weak

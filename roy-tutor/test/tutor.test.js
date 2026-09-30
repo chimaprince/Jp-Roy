@@ -85,7 +85,8 @@ test('practical usage: the sentence step teaches usage first, with the stored ex
   const entry = entryAt(db, 'vol1', 1);
   await tutor.start();
   assert.equal(last(teacher).current_entry.practical_usage, null, 'nothing stored yet: the teacher writes its own');
-  saveListenContent(db, entry.id, { sentence_zh: '我们需要给你做硬膜外麻醉。', sentence_en: 'We need to give you an epidural.', usage_en: 'Used in labour and surgery.', context_en: 'An anaesthetist explains pain relief.' }, 'test');
+  const dialogue = [{ speaker: '医生', zh: '我们可以给你做硬膜外麻醉。', en: 'We can give you an epidural.' }, { speaker: '患者', zh: '会很疼吗？', en: 'Will it be painful?' }];
+  saveListenContent(db, entry.id, { v: 2, explanation_en: 'Medicine given into the epidural space for pain relief.', sentence_zh: '我们需要给你做硬膜外麻醉。', sentence_en: 'We need to give you an epidural.', usage_en: 'Used in labour and surgery.', context_en: 'An anaesthetist explains pain relief.', dialogue, source: 'teacher' }, 'test');
   teacher.next(done(), done());
   await tutor.message('硬膜外', voice); // pronounce done
   await tutor.message('an injection into the spine', { source: 'voice' }); // meaning done -> sentence next
@@ -94,10 +95,22 @@ test('practical usage: the sentence step teaches usage first, with the stored ex
   assert.equal(ctx.lesson_state.exercise, 'meaning');
   assert.match(ctx.if_complete.instruction, /practical usage/);
   assert.match(ctx.if_complete.instruction, /exact term/);
-  assert.deepEqual(ctx.current_entry.practical_usage, { sentence_zh: '我们需要给你做硬膜外麻醉。', sentence_en: 'We need to give you an epidural.', usage_en: 'Used in labour and surgery.', context_en: 'An anaesthetist explains pain relief.' });
+  assert.deepEqual(ctx.current_entry.practical_usage, {
+    written_by: 'the AI teacher (not JH Medics)',
+    explanation_en: 'Medicine given into the epidural space for pain relief.',
+    usage_en: 'Used in labour and surgery.',
+    sentence_zh: '我们需要给你做硬膜外麻醉。',
+    sentence_en: 'We need to give you an epidural.',
+    context_en: 'An anaesthetist explains pain relief.',
+    dialogue,
+  });
   await tutor.message('随便说说', voice);
   assert.equal(last(teacher).lesson_state.exercise, 'sentence');
   assert.match(last(teacher).lesson_state.exercise_goal, /Only his own sentence completes/);
+  teacher.next(done());
+  await tutor.message('医生说我们需要打硬膜外。', voice); // sentence done -> role-play next
+  assert.match(last(teacher).if_complete.instruction, /real medical situation/, 'the role-play starts "Now let\'s use it in a real medical situation"');
+  assert.match(last(teacher).if_complete.instruction, /practical_usage\.dialogue/);
 });
 
 test('session start sends the teacher the entry and lesson state; mic language is Mandarin', async () => {

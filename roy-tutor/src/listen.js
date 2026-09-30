@@ -2,94 +2,89 @@
 // nothing is asked and nothing is recorded, so the microphone is never used.
 //
 // From the curriculum (JH Medics Volume 1 is the source of truth): the term,
-// its pinyin, the English and the medical meaning. From the teacher (written
-// once per entry by Qwen, checked, stored; see listencontent.js): a natural
-// sentence using the exact term, its English translation, where the term is
-// used, and a doctor/patient/interpreter situation. Each step says where its
-// text comes from.
+// its pinyin, the English and the medical meaning. From the AI teacher
+// (written once per entry by Qwen, checked, stored; see listencontent.js): a
+// short explanation, practical usage, a natural sentence using the exact term
+// and its translation, an interpreter situation and, when useful, a short
+// doctor/patient exchange. Each step says where its text comes from.
 //
 // Every line is spoken by Qwen TTS on the server. Mandarin lines contain only
 // Chinese, so the voice reads them as Mandarin; pinyin is never sent to TTS (a
 // Mandarin voice reads letters oddly): it is shown on screen while the voice
 // says the characters. English lines contain only English.
 //
-// Order: the term; slowly with pinyin on screen; English; medical meaning;
-// syllable by syllable (only when each character has one reading, so the voice
-// cannot pick a wrong one); where it is used; an example sentence; its
-// translation; a practical situation; the term once more.
-import { polyphonic } from 'pinyin-pro';
-
-const HAN = /\p{Script=Han}/u;
-
-// Split the term into characters and the curriculum pinyin into syllables;
-// null when they do not line up one-to-one.
-function syllablePairs(entry) {
-  const chars = [...String(entry.mandarin || '')].filter((c) => HAN.test(c));
-  const syllables = String(entry.pinyin || '').split(/[\s/,()（）-]+/).filter((s) => /\p{L}/u.test(s));
-  if (chars.length < 2 || chars.length !== syllables.length) return null;
-  return chars.map((char, i) => ({ char, syllable: syllables[i] }));
-}
-
-const singleReading = (char) => (polyphonic(char, { type: 'array' })[0] ?? []).length === 1;
+// A lesson is a few natural segments (5 to 7), not one line per field, so a
+// word costs only 4 to 6 TTS requests; the term at the start and at the end is
+// the same audio (cached):
+//
+//   1 term       the Mandarin term, slowly (pinyin on screen)
+//   2 explain    "Epidural. <what it means> <where it is used> For example:"
+//   3 sentence   the Mandarin example sentence
+//   4 sentence-en "That means: <translation>. <interpreter situation>"
+//   5 dialogue / dialogue-en   a short exchange, only when the teacher wrote one
+//   6 repeat     the term once more, slowly
+//
+// Then the player moves on to the next word by itself (see ListenController).
 
 // Kinds of step that must be in every lesson (tests check these).
-export const REQUIRED_STEPS = ['term', 'pinyin', 'english', 'meaning', 'usage', 'sentence', 'sentence-en', 'context', 'repeat'];
+export const REQUIRED_STEPS = ['term', 'explain', 'sentence', 'sentence-en', 'repeat'];
 // A review lesson (start of a new study day) is the short version.
-export const REVIEW_STEPS = ['term', 'pinyin', 'english', 'sentence', 'sentence-en', 'repeat'];
+export const REVIEW_STEPS = ['term', 'explain', 'sentence', 'sentence-en', 'repeat'];
+
+const SPEAKER_EN = { 医生: 'Doctor', 患者: 'Patient', 护士: 'Nurse', 翻译: 'Interpreter', 家属: 'Family member' };
+const sentenceEnd = (t) => (/[.!?]$/.test(t) ? t : `${t}.`);
 
 /**
  * @param entry    curriculum entry
  * @param total    number of entries in the course
- * @param content  { sentence_zh, sentence_en, usage_en, context_en, source: 'teacher'|'template' }
+ * @param content  { explanation_en, usage_en, sentence_zh, sentence_en, context_en, dialogue, source }
  * @param review   true: the short review version
  */
 export function listenLesson(entry, total, content, { review = false } = {}) {
   const term = String(entry.mandarin || '').trim();
   const pinyin = String(entry.pinyin || '').trim();
   const english = String(entry.english || '').trim();
-  const meaning = String(entry.meaning || '').trim();
   const from = content?.source === 'teacher' ? 'teacher' : 'template';
+  const dialogue = review ? [] : (Array.isArray(content.dialogue) ? content.dialogue : []);
   const steps = [];
   const add = (kind, lang, text, show, source, extra = {}) => { if (text) steps.push({ kind, lang, text, show, source, ...extra }); };
   const withPinyin = pinyin ? `${term}  ${pinyin}` : `${term}  (no pinyin in the source)`;
+  const English = english ? english[0].toUpperCase() + english.slice(1) : '';
+  const onceMore = 'Once more:';
 
-  const lesson = (steps) => ({
+  add('term', 'zh', term, withPinyin, 'curriculum', { rate: 0.8 });
+  if (review) {
+    add('explain', 'en', `Review. ${English ? sentenceEnd(English) : ''} For example:`.replace(/\s+/g, ' '), english || '(no English in the source)', 'curriculum');
+  } else {
+    add('explain', 'en', [English && sentenceEnd(English), content.explanation_en, content.usage_en, 'For example:'].filter(Boolean).join(' '),
+      [english || '(no English in the source)', content.explanation_en, content.usage_en].filter(Boolean).join('\n\n'), from);
+  }
+  add('sentence', 'zh', content.sentence_zh, content.sentence_zh, from);
+  const tail = dialogue.length ? 'Here is a short conversation.' : onceMore;
+  add('sentence-en', 'en', [`That means: ${sentenceEnd(content.sentence_en)}`, review ? null : content.context_en, tail].filter(Boolean).join(' '),
+    [content.sentence_zh, content.sentence_en, review ? null : content.context_en].filter(Boolean).join('\n\n'), from);
+  if (dialogue.length) {
+    const shown = dialogue.map((l) => `${l.speaker}：${l.zh}\n${SPEAKER_EN[l.speaker] ?? l.speaker}: ${l.en}`).join('\n');
+    add('dialogue', 'zh', dialogue.map((l) => `${l.speaker}：${l.zh}`).join(' '), shown, from);
+    add('dialogue-en', 'en', `${dialogue.map((l) => `${SPEAKER_EN[l.speaker] ?? l.speaker}: ${sentenceEnd(l.en)}`).join(' ')} ${onceMore}`, shown, from);
+  }
+  add('repeat', 'zh', term, withPinyin, 'curriculum', { rate: 0.8 });
+
+  return {
     position: entry.position,
     total,
     card: { position: entry.position, mandarin: entry.mandarin, pinyin: entry.pinyin || null, english: entry.english, meaning: entry.meaning ?? null, sourcePage: entry.source_page ?? null },
+    // The teaching layer as structured data (what the steps are made from).
+    teaching: {
+      source: from,
+      explanation_en: content.explanation_en ?? null,
+      usage_en: content.usage_en ?? null,
+      sentence_zh: content.sentence_zh,
+      sentence_en: content.sentence_en,
+      context_en: content.context_en ?? null,
+      dialogue,
+    },
     example: { sentence_zh: content.sentence_zh, sentence_en: content.sentence_en, source: from },
     steps,
-  });
-
-  if (review) {
-    add('intro', 'en', `Review: word ${entry.position}.`, `Review · Word ${entry.position}`, 'curriculum');
-    add('term', 'zh', term, withPinyin, 'curriculum');
-    add('pinyin', 'zh', term, withPinyin, 'curriculum', { rate: 0.8 });
-    add('english', 'en', english ? `In English: ${english}.` : 'In English: not given in the source.', english || '(no English in the source)', 'curriculum');
-    add('sentence', 'zh', content.sentence_zh, content.sentence_zh, from);
-    add('sentence-en', 'en', `That means: ${content.sentence_en}`, `${content.sentence_zh}\n${content.sentence_en}`, from);
-    add('repeat', 'zh', term, withPinyin, 'curriculum', { rate: 0.9 });
-    return lesson(steps);
-  }
-
-  add('intro', 'en', `Word ${entry.position} of ${total}.`, `Word ${entry.position} of ${total}`, 'curriculum');
-  add('term', 'zh', term, withPinyin, 'curriculum');
-  add('pinyin', 'zh', term, withPinyin, 'curriculum', { rate: 0.8 });
-  add('english', 'en', english ? `In English: ${english}.` : 'In English: not given in the source.', english || '(no English in the source)', 'curriculum');
-  add('meaning', 'en', meaning ? `The medical meaning, from JH Medics: ${meaning}` : 'JH Medics gives no meaning for this term.', meaning || '(no meaning in the source)', 'curriculum');
-  const pairs = syllablePairs(entry);
-  if (pairs && pairs.every((p) => singleReading(p.char))) {
-    const shown = pairs.map((p) => `${p.char} ${p.syllable}`).join(' · ');
-    add('breakdown-intro', 'en', 'Syllable by syllable.', shown, 'curriculum');
-    add('breakdown', 'zh', pairs.map((p) => p.char).join('，'), shown, 'curriculum', { rate: 0.8 });
-  }
-  add('usage', 'en', `Where you will hear it: ${content.usage_en}`, content.usage_en, from);
-  add('sentence-intro', 'en', 'For example:', content.sentence_zh, from);
-  add('sentence', 'zh', content.sentence_zh, content.sentence_zh, from);
-  add('sentence-en', 'en', `That means: ${content.sentence_en}`, `${content.sentence_zh}\n${content.sentence_en}`, from);
-  add('context', 'en', `In practice: ${content.context_en}`, content.context_en, from);
-  add('repeat-intro', 'en', english ? `Once more, ${english}:` : 'Once more:', withPinyin, 'curriculum');
-  add('repeat', 'zh', term, withPinyin, 'curriculum', { rate: 0.9 });
-
-  return lesson(steps);
+  };
 }

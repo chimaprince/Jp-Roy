@@ -20,7 +20,7 @@ const EXERCISE_GOALS = {
   pronounce: 'Roy says the Mandarin term aloud.',
   meaning: 'Roy explains in English, in his own words, what the term means. Any wording that shows he understands the concept counts.',
   sentence: 'First teach practical usage: in one or two short sentences say how the term is used in real medical communication and where Roy would hear or use it (doctor, patient or interpreter), then give one natural model sentence containing the exact term (a zh line) and its English. Use current_entry.practical_usage when it is given. Then ask Roy to make his own short Mandarin sentence with the term. Only his own sentence completes this exercise.',
-  roleplay: 'A short interpreting scene (2-3 exchanges). You play the other people; Roy plays his role and must use the term in Mandarin.',
+  roleplay: 'Say "Now let\'s use it in a real medical situation", then run a short interpreting scene (2-3 exchanges) in a hospital or clinic. You play the other people (doctor, patient, nurse, family); Roy plays his role and must use the term in Mandarin. current_entry.practical_usage.dialogue, when given, is a good starting point.',
   review: 'Roy recalls the Mandarin for this English term (he studied it before).',
 };
 // Which recogniser language the microphone uses for each exercise.
@@ -75,7 +75,15 @@ function entryFacts(entry, total) {
 function practicalUsage(db, entry) {
   const c = store.getListenContent(db, entry.id);
   if (!c?.sentence_zh || !c.sentence_zh.includes(entry.mandarin)) return null;
-  return { sentence_zh: c.sentence_zh, sentence_en: c.sentence_en ?? null, usage_en: c.usage_en ?? null, context_en: c.context_en ?? null };
+  return {
+    written_by: 'the AI teacher (not JH Medics)',
+    explanation_en: c.explanation_en ?? null,
+    usage_en: c.usage_en ?? null,
+    sentence_zh: c.sentence_zh,
+    sentence_en: c.sentence_en ?? null,
+    context_en: c.context_en ?? null,
+    dialogue: Array.isArray(c.dialogue) && c.dialogue.length ? c.dialogue : null,
+  };
 }
 
 export class Tutor {
@@ -236,7 +244,12 @@ export class Tutor {
     if (!entry) throw Object.assign(new Error(`Word ${position} is not in the curriculum.`), { status: 400 });
     const progress = store.getProgress(this.db, this.userId, course.id);
     const nowIso = this.now().toISOString();
-    const completes = !review && progress.current_position === entry.position;
+    // A word heard in full is completed: Roy's current word, or a word after it
+    // that he reached with Next. Only completing the current word moves the
+    // shared place (to the first word not yet completed), so a skipped word is
+    // never passed over silently.
+    const isPlace = !review && progress.current_position === entry.position;
+    const completes = !review && entry.position >= progress.current_position;
     if (completes) {
       const ep = store.getEntryProgress(this.db, this.userId, entry.id);
       store.updateEntryProgress(this.db, this.userId, entry.id, {
@@ -245,11 +258,27 @@ export class Tutor {
         last_reviewed: nowIso,
         confidence: Math.max(ep.confidence, 1), // heard, not yet practised aloud
       });
-      store.updateProgress(this.db, this.userId, course.id, { current_position: entry.position + 1 });
+    }
+    if (isPlace) {
+      store.updateProgress(this.db, this.userId, course.id, { current_position: this.#firstOpenAfter(course, entry.position) });
       this.#moveSessionPast(course, progress, entry);
     }
     store.logListen(this.db, { userId: this.userId, entryId: entry.id, studyDate: localDate(this.now()), review, completed: completes, now: nowIso });
-    return { position: entry.position, completed: completes, ...this.listenProgress() };
+    return { position: entry.position, completed: completes, placeMoved: isPlace, ...this.listenProgress() };
+  }
+
+  // The shared place after completing word `position`: the next word in book
+  // order that is not completed yet (words heard ahead after a Next are
+  // passed), or one past the end.
+  #firstOpenAfter(course, position) {
+    const total = store.courseLength(this.db, course.id);
+    let p = position + 1;
+    while (p <= total) {
+      const e = store.entryAt(this.db, course.id, p);
+      if (!e || !store.getEntryProgress(this.db, this.userId, e.id).completed) break;
+      p += 1;
+    }
+    return p;
   }
 
   // The Listen & Learn review block finished (it plays once per study day).
@@ -664,7 +693,7 @@ export class Tutor {
     if (!session.words_studied.includes(entry.id)) session.words_studied.push(entry.id);
     const progress = store.getProgress(this.db, this.userId, course.id);
     if (progress.current_position === entry.position) {
-      store.updateProgress(this.db, this.userId, course.id, { current_position: entry.position + 1 });
+      store.updateProgress(this.db, this.userId, course.id, { current_position: this.#firstOpenAfter(course, entry.position) });
     }
     this.#resumeCurriculum(course, session);
   }

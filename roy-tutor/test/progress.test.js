@@ -70,19 +70,23 @@ test('finishing the current word\'s Listen lesson completes it and moves the sha
   assert.equal(tutor.completeByListening(2).currentPosition, 3, 'and on to word 3');
 });
 
-test('no accidental skipping: finishing a word reached with Next, an earlier word, or a review never moves the place', () => {
+test('one shared place: a word heard ahead (after Next) is completed but never moves the place past a skipped word; the place then passes completed words', () => {
   const { tutor, pos, completed } = setup();
-  const ahead = tutor.completeByListening(3);
-  assert.equal(ahead.completed, false);
-  assert.equal(pos(), 1, 'still at word 1');
-  assert.equal(completed(3), 0);
+  const ahead = tutor.completeByListening(3); // Roy pressed Next on 1 and 2, then heard 3 in full
+  assert.equal(ahead.completed, true, 'word 3 was heard in full: completed');
+  assert.equal(ahead.placeMoved, false);
+  assert.equal(pos(), 1, 'the place stays at the skipped word 1');
+  assert.equal(completed(3), 1);
+  assert.equal(completed(1), 0, 'the skipped word is not completed');
   tutor.completeByListening(1);
-  assert.equal(pos(), 2);
+  assert.equal(pos(), 2, 'word 2 was skipped too: the place stops there');
+  tutor.completeByListening(2);
+  assert.equal(pos(), 4, 'word 3 is already completed: the place passes it');
   assert.equal(tutor.completeByListening(1).completed, false, 'listening to an earlier word again changes nothing');
-  assert.equal(pos(), 2);
+  assert.equal(pos(), 4);
   assert.equal(tutor.completeByListening(2, { review: true }).completed, false, 'a review lesson never completes a word');
-  assert.equal(pos(), 2);
-  assert.equal(tutor.listenProgress().listened, 2, 'words 1 and 3 were fully listened to');
+  assert.equal(pos(), 4);
+  assert.equal(tutor.listenProgress().listened, 3, 'words 1, 2 and 3 were fully listened to');
   assert.throws(() => tutor.completeByListening(99), /not in the curriculum/);
 });
 
@@ -221,7 +225,7 @@ async function fakeQwen(writer) {
     if (req.url === '/tts') { seen.tts += 1; return json({ output: { audio: { data: wav.toString('base64') } } }); }
     if (req.url === '/teacher/chat/completions') {
       const body = JSON.parse(raw);
-      if (/listening material/.test(body.messages[0].content)) {
+      if (/You write the teaching layer/.test(body.messages[0].content)) {
         const entry = JSON.parse(body.messages[1].content);
         seen.writer.push(entry.mandarin);
         return json({ id: 'w', choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: writer(entry) } }] });
@@ -258,7 +262,7 @@ async function startServer(qwenPort, extra = {}) {
   return { url, call, received, stop };
 }
 
-const goodWriter = (e) => JSON.stringify({ sentence_zh: `医生说${e.mandarin}需要检查。`, sentence_en: `The doctor said the ${e.english} needs to be checked.`, usage_en: `Doctors use this word when examining the ${e.english}.`, context_en: `A doctor tells a patient, through the interpreter, that the ${e.english} needs to be checked.` });
+const goodWriter = (e) => JSON.stringify({ explanation_en: `In medical communication this term means ${e.english}.`, dialogue: [], sentence_zh: `医生说${e.mandarin}需要检查。`, sentence_en: `The doctor said the ${e.english} needs to be checked.`, usage_en: `Doctors use this word when examining the ${e.english}.`, context_en: `A doctor tells a patient, through the interpreter, that the ${e.english} needs to be checked.` });
 
 test('server: Listen follows the shared position; only a finished lesson completes a word; Interactive sees it', async () => {
   const q = await fakeQwen(goodWriter);
@@ -286,7 +290,11 @@ test('server: Listen follows the shared position; only a finished lesson complet
     assert.equal((await s.call('GET', '/api/listen')).body.position, 2);
 
     const ahead = (await s.call('POST', '/api/listen/complete', { position: 4 })).body;
-    assert.deepEqual([ahead.completed, ahead.currentPosition], [false, 2], 'a skipped-to word does not move the place');
+    assert.deepEqual([ahead.completed, ahead.placeMoved, ahead.currentPosition], [true, false, 2], 'a word heard ahead is completed, but the place stays at the skipped word');
+    // The lesson carries the structured teaching layer written by Qwen.
+    assert.equal(one.teaching.source, 'teacher');
+    assert.match(one.teaching.explanation_en, /epidural/);
+    assert.ok(one.teaching.usage_en && one.teaching.sentence_en && one.teaching.context_en);
     assert.equal((await s.call('POST', '/api/listen/complete', { position: 999 })).status, 400);
     assert.equal((await s.call('POST', '/api/listen/complete', {})).status, 400);
     assert.equal((await s.call('GET', '/api/listen?position=0')).status, 400);

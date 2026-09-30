@@ -7,8 +7,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { listenLesson, REQUIRED_STEPS, REVIEW_STEPS } from '../src/listen.js';
-import { checkListenContent, templateContent, createListenWriter } from '../src/listencontent.js';
-import { ListenController, listenStatusText } from '../public/voice-core.js';
+import { checkListenContent, cleanDialogue, templateContent, createListenWriter } from '../src/listencontent.js';
+import { ListenController, listenStatusText, listenWhereText } from '../public/voice-core.js';
 
 const appDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const HAN = /\p{Script=Han}/u;
@@ -17,51 +17,64 @@ const ENTRIES = curriculum.entries ?? curriculum;
 const SHIDAO = ENTRIES[1]; // 食道 shí dào esophagus
 
 const TEACHER_SHIDAO = {
+  v: 2,
+  explanation_en: 'The esophagus is the tube that carries food from the throat to the stomach.',
+  usage_en: 'You may hear this word when doctors discuss swallowing problems or inflammation of the esophagus.',
   sentence_zh: '医生说食道有炎症。',
   sentence_en: 'The doctor said there is inflammation in the esophagus.',
-  usage_en: 'You may hear this word when doctors discuss swallowing problems or inflammation of the esophagus.',
   context_en: 'A patient says food gets stuck when swallowing, and the doctor explains the problem is in the esophagus.',
+  dialogue: [
+    { speaker: '医生', zh: '你吞东西的时候食道疼吗？', en: 'Does your esophagus hurt when you swallow?' },
+    { speaker: '患者', zh: '有一点疼。', en: 'It hurts a little.' },
+  ],
   source: 'teacher',
 };
 
 // ---------- the lesson ----------
 
-test('a lesson has every part: word, pinyin, English, meaning, usage, sentence, translation, situation, word again', () => {
+test('a lesson teaches the word: term (pinyin on screen), English + explanation + practical usage, example, translation + interpreter situation, dialogue, term again', () => {
   assert.equal(SHIDAO.mandarin, '食道');
   const l = listenLesson(SHIDAO, 385, TEACHER_SHIDAO);
   const kinds = l.steps.map((s) => s.kind);
+  assert.deepEqual(kinds, ['term', 'explain', 'sentence', 'sentence-en', 'dialogue', 'dialogue-en', 'repeat'], 'the standard teaching order');
   for (const k of REQUIRED_STEPS) assert.ok(kinds.includes(k), `has ${k}`);
-  const order = (k) => kinds.indexOf(k);
-  for (const [a, b] of [['term', 'pinyin'], ['pinyin', 'english'], ['english', 'meaning'], ['meaning', 'usage'], ['usage', 'sentence'], ['sentence', 'sentence-en'], ['sentence-en', 'context'], ['context', 'repeat']]) {
-    assert.ok(order(a) < order(b), `${a} before ${b}`);
-  }
-  assert.equal(l.steps.at(-1).kind, 'repeat', 'ends by saying the word again');
   const by = Object.fromEntries(l.steps.map((s) => [s.kind, s]));
-  assert.deepEqual([by.term.lang, by.term.text], ['zh', '食道']);
-  assert.equal(by.pinyin.text, '食道', 'the voice says the characters');
-  assert.match(by.pinyin.show, /shí dào/, 'pinyin on screen');
-  assert.equal(by.english.text, 'In English: esophagus.');
-  assert.ok(by.meaning.text.includes(SHIDAO.meaning), 'JH Medics meaning, verbatim');
-  assert.equal(by.meaning.source, 'curriculum');
+  assert.deepEqual([by.term.lang, by.term.text], ['zh', '食道'], 'the voice says the characters');
+  assert.match(by.term.show, /食道 {2}shí dào/, 'pinyin on screen, not spoken');
+  assert.equal(by.term.rate, 0.8, 'the term slowly, for a learner');
+  assert.equal(by.term.source, 'curriculum');
+  assert.equal(by.explain.lang, 'en');
+  assert.equal(by.explain.text, `Esophagus. ${TEACHER_SHIDAO.explanation_en} ${TEACHER_SHIDAO.usage_en} For example:`);
+  assert.equal(by.explain.source, 'teacher', 'the explanation is marked as the AI teacher\'s, not JH Medics\'');
   assert.deepEqual([by.sentence.lang, by.sentence.text], ['zh', '医生说食道有炎症。']);
-  assert.ok(by.sentence.text.includes('食道'), 'the exact word in a sentence');
-  assert.equal(by['sentence-en'].text, 'That means: The doctor said there is inflammation in the esophagus.');
-  assert.match(by.usage.text, /^Where you will hear it: .*swallowing/);
-  assert.match(by.context.text, /^In practice: .*patient.*doctor/);
-  for (const k of ['usage', 'sentence', 'sentence-en', 'context']) assert.equal(by[k].source, 'teacher', `${k} is marked as the teacher's`);
-  assert.deepEqual(l.example, { sentence_zh: '医生说食道有炎症。', sentence_en: 'The doctor said there is inflammation in the esophagus.', source: 'teacher' });
+  assert.equal(by['sentence-en'].text, `That means: The doctor said there is inflammation in the esophagus. ${TEACHER_SHIDAO.context_en} Here is a short conversation.`);
+  assert.equal(by.dialogue.text, '医生：你吞东西的时候食道疼吗？ 患者：有一点疼。');
+  assert.equal(by['dialogue-en'].text, 'Doctor: Does your esophagus hurt when you swallow? Patient: It hurts a little. Once more:');
+  assert.deepEqual([by.repeat.lang, by.repeat.text, by.repeat.rate], ['zh', '食道', 0.8], 'ends by saying the word again, clearly');
+  // The teaching layer as structured data.
+  assert.deepEqual(l.teaching, {
+    source: 'teacher', explanation_en: TEACHER_SHIDAO.explanation_en, usage_en: TEACHER_SHIDAO.usage_en,
+    sentence_zh: TEACHER_SHIDAO.sentence_zh, sentence_en: TEACHER_SHIDAO.sentence_en, context_en: TEACHER_SHIDAO.context_en, dialogue: TEACHER_SHIDAO.dialogue,
+  });
+  // Few audio segments: 7 steps, 6 distinct texts (the term at start and end is one audio).
+  assert.equal(new Set(l.steps.map((s) => s.text)).size, 6);
+  const plain = listenLesson(SHIDAO, 385, { ...TEACHER_SHIDAO, dialogue: [] });
+  assert.deepEqual(plain.steps.map((s) => s.kind), ['term', 'explain', 'sentence', 'sentence-en', 'repeat'], 'no dialogue: 5 segments');
+  assert.match(plain.steps[3].text, /Once more:$/);
 });
 
-test('all 385 words: practical usage, a sentence with the exact word, medical context; one language per line', () => {
+test('all 385 words: explanation, practical usage, a sentence with the exact word, translation, medical context; one language per line; 4-6 audio segments', () => {
   assert.equal(ENTRIES.length, 385);
   for (const e of ENTRIES) {
     const l = listenLesson(e, ENTRIES.length, templateContent(e));
     const kinds = l.steps.map((s) => s.kind);
     for (const k of REQUIRED_STEPS) assert.ok(kinds.includes(k), `word ${e.position} has ${k}`);
-    const sentence = l.steps.find((s) => s.kind === 'sentence').text;
-    assert.ok(sentence.includes(e.mandarin.trim()), `word ${e.position}: sentence uses ${e.mandarin}`);
-    assert.match(l.steps.find((s) => s.kind === 'usage').text, /doctors, nurses and patients/);
-    assert.match(l.steps.find((s) => s.kind === 'context').text, /interpreter/);
+    const by = Object.fromEntries(l.steps.map((s) => [s.kind, s]));
+    assert.ok(by.sentence.text.includes(e.mandarin.trim()), `word ${e.position}: sentence uses ${e.mandarin}`);
+    assert.match(by.explain.text, /doctors, nurses and patients/, 'practical usage');
+    assert.match(by['sentence-en'].text, /^That means: .*interpreter/, 'translation and interpreter situation');
+    if (e.meaning) assert.ok(by.explain.text.includes('JH Medics defines it as:'), 'template explanation quotes the source, labelled');
+    assert.ok(new Set(l.steps.map((s) => s.text)).size <= 6, `word ${e.position}: at most 6 TTS requests`);
     for (const s of l.steps) {
       assert.ok(s.text.trim(), `${e.position} ${s.kind} has text`);
       if (s.lang === 'zh') {
@@ -75,16 +88,15 @@ test('all 385 words: practical usage, a sentence with the exact word, medical co
   }
 });
 
-test('a review lesson (new study day) is the short version: word, pinyin, English, sentence, translation, word again', () => {
+test('a review lesson (new study day) is the short version: word, English, sentence, translation, word again', () => {
   const l = listenLesson(SHIDAO, 385, TEACHER_SHIDAO, { review: true });
-  const kinds = l.steps.map((s) => s.kind);
-  for (const k of REVIEW_STEPS) assert.ok(kinds.includes(k), `has ${k}`);
-  assert.ok(!kinds.includes('meaning') && !kinds.includes('usage'), 'short');
-  assert.match(l.steps[0].text, /^Review: word 2\./);
+  assert.deepEqual(l.steps.map((s) => s.kind), REVIEW_STEPS);
+  assert.equal(l.steps[1].text, 'Review. Esophagus. For example:');
   assert.equal(l.steps.at(-1).text, '食道');
+  assert.ok(!l.steps.some((s) => s.kind === 'dialogue'), 'short');
 });
 
-test('the teacher\'s example is checked: exact word, short, Mandarin only in the sentence, English only elsewhere', () => {
+test('the teacher\'s material is checked: exact word, short, Mandarin only in the sentence, English only elsewhere; a bad dialogue is dropped', () => {
   assert.deepEqual(checkListenContent(SHIDAO, TEACHER_SHIDAO), []);
   const bad = (over) => checkListenContent(SHIDAO, { ...TEACHER_SHIDAO, ...over }).join('; ');
   assert.match(bad({ sentence_zh: '医生说食管有炎症。' }), /must contain the exact term 食道/, 'a synonym is not the curriculum word');
@@ -92,9 +104,17 @@ test('the teacher\'s example is checked: exact word, short, Mandarin only in the
   assert.match(bad({ sentence_zh: `医生说食道${'很'.repeat(40)}。` }), /longer than/);
   assert.match(bad({ sentence_en: 'The doctor said 食道 is inflamed.' }), /sentence_en must be English only/);
   assert.match(bad({ usage_en: '' }), /usage_en is missing/);
+  assert.match(bad({ explanation_en: undefined }), /explanation_en is missing/);
   assert.match(bad({ context_en: undefined }), /context_en is missing/);
   const xray = ENTRIES.find((e) => e.mandarin === '乳房x光片');
   assert.deepEqual(checkListenContent(xray, { ...TEACHER_SHIDAO, sentence_zh: '医生让她去拍乳房x光片。' }), [], 'letters that are part of the term are fine');
+  // The dialogue is optional; a wrong one is dropped, never played.
+  assert.deepEqual(cleanDialogue(SHIDAO, TEACHER_SHIDAO.dialogue), TEACHER_SHIDAO.dialogue);
+  assert.deepEqual(cleanDialogue(SHIDAO, []), []);
+  assert.deepEqual(cleanDialogue(SHIDAO, [{ speaker: '医生', zh: '你好。', en: 'Hello.' }, { speaker: '患者', zh: '你好。', en: 'Hello.' }]), [], 'no line with the term');
+  assert.deepEqual(cleanDialogue(SHIDAO, [{ speaker: '医生', zh: '食道 shí dào 疼吗？', en: 'Pain?' }, { speaker: '患者', zh: '疼。', en: 'Yes.' }]), [], 'pinyin in a Mandarin line');
+  assert.deepEqual(cleanDialogue(SHIDAO, [{ speaker: 'Teacher', zh: '食道疼吗？', en: 'Pain?' }, { speaker: '患者', zh: '疼。', en: 'Yes.' }]), [], 'unknown speaker');
+  assert.deepEqual(cleanDialogue(SHIDAO, [{ speaker: '医生', zh: '食道疼吗？', en: '食道 pain?' }, { speaker: '患者', zh: '疼。', en: 'Yes.' }]), [], 'Chinese in an English line');
 });
 
 function fakeClient(replies) {
@@ -111,18 +131,29 @@ function fakeClient(replies) {
 }
 const quietLog = { log() {}, warn() {} };
 
-test('the Qwen writer: a good reply is used; a bad reply is corrected once; otherwise a plain template', async () => {
-  const good = fakeClient([TEACHER_SHIDAO]);
+test('the Qwen writer: generates the teaching layer (the curriculum has no examples); a bad reply is corrected once; otherwise a plain template', async () => {
+  const { source: _s, v: _v, ...reply } = TEACHER_SHIDAO;
+  const good = fakeClient([reply]);
   const w = createListenWriter({ client: good, env: {}, log: quietLog });
   const r = await w.write(SHIDAO);
   assert.equal(r.source, 'teacher');
+  assert.equal(r.content.v, 2);
   assert.equal(r.content.sentence_zh, '医生说食道有炎症。');
+  assert.equal(r.content.explanation_en, TEACHER_SHIDAO.explanation_en);
+  assert.deepEqual(r.content.dialogue, TEACHER_SHIDAO.dialogue);
   const prompt = good.calls[0].messages[0].content;
-  assert.match(prompt, /contains the exact Mandarin term/);
-  assert.match(prompt, /No unrelated vocabulary/);
-  assert.equal(JSON.parse(good.calls[0].messages[1].content).mandarin, '食道');
+  assert.match(prompt, /JH Medics has no examples, so the explanation and examples are yours/);
+  assert.match(prompt, /containing the exact Mandarin term/);
+  assert.match(prompt, /do not invent unsupported medical facts/);
+  assert.match(prompt, /Stay in medical communication/);
+  const facts = JSON.parse(good.calls[0].messages[1].content);
+  assert.deepEqual([facts.mandarin, facts.pinyin, facts.english, facts.jh_medics_meaning], ['食道', SHIDAO.pinyin, SHIDAO.english, SHIDAO.meaning], 'the curriculum entry is what Qwen teaches from');
 
-  const fixed = fakeClient([{ ...TEACHER_SHIDAO, sentence_zh: '他的喉咙很痛。' }, TEACHER_SHIDAO]);
+  const noDialogue = await createListenWriter({ client: fakeClient([{ ...reply, dialogue: [{ speaker: '医生', zh: 'bad', en: 'x' }] }]), env: {}, log: quietLog }).write(SHIDAO);
+  assert.equal(noDialogue.source, 'teacher', 'a bad dialogue alone does not reject the lesson');
+  assert.deepEqual(noDialogue.content.dialogue, []);
+
+  const fixed = fakeClient([{ ...reply, sentence_zh: '他的喉咙很痛。' }, reply]);
   assert.equal((await createListenWriter({ client: fixed, env: {}, log: quietLog }).write(SHIDAO)).source, 'teacher');
   assert.match(fixed.calls[1].messages.at(-1).content, /must contain the exact term 食道/);
 
@@ -405,3 +436,16 @@ test('the Listen code path never asks for the microphone', () => {
   assert.doesNotMatch(core.slice(core.indexOf('export class ListenController')), /getUserMedia|MediaRecorder/);
 });
 
+
+test('the page wording: one shared place, never "press Next"; which word plays vs. where the place is', () => {
+  const lesson = (position, extra = {}) => ({ position, total: 385, review: false, ...extra });
+  assert.equal(listenWhereText(lesson(2), 2, 1), 'Now teaching: Word 2 of 385 · 1 word listened');
+  assert.equal(listenWhereText(lesson(3), 1, 2), 'Now playing: Word 3 of 385, ahead of your place · your place stays at Word 1 (skipped, not completed yet) · 2 words listened');
+  assert.match(listenWhereText(lesson(4, { review: true, reviewIndex: 0, reviewCount: 2 }), 9), /^Review 1 of 2 · Word 4/);
+  const view = { state: 'gap', position: 1, review: false, next: { position: 2, review: false }, index: 6, steps: 7 };
+  assert.equal(listenStatusText(view), 'Word 1 complete. Moving to Word 2…');
+  assert.equal(listenStatusText({ ...view, state: 'loading', loadingTarget: { position: 2 } }), "Preparing Word 2 (the teacher's lesson and voice)…");
+  for (const state of ['loading', 'playing', 'gap', 'paused', 'finished']) {
+    assert.doesNotMatch(listenStatusText({ ...view, state }), /Finished this word|→ Next for the next word/);
+  }
+});
