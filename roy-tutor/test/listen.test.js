@@ -67,14 +67,14 @@ test('a lesson teaches the word: term (pinyin on screen), English + explanation 
 test('all 385 words: explanation, practical usage, a sentence with the exact word, translation, medical context; one language per line; at most 8 audio segments', () => {
   assert.equal(ENTRIES.length, 385);
   for (const e of ENTRIES) {
-    const l = listenLesson(e, ENTRIES.length, templateContent(e));
+    const l = listenLesson(e, ENTRIES.length, templateContent(e, { courseTitle: 'JH Medics Volume 1' }));
     const kinds = l.steps.map((s) => s.kind);
     for (const k of REQUIRED_STEPS) assert.ok(kinds.includes(k), `word ${e.position} has ${k}`);
     const by = Object.fromEntries(l.steps.map((s) => [s.kind, s]));
     assert.ok(by.sentence.text.includes(e.mandarin.trim()), `word ${e.position}: sentence uses ${e.mandarin}`);
     assert.match(by.explain.text, /doctors, nurses and patients/, 'practical usage');
     assert.match(by['sentence-en'].text, /^That means: .*interpreter/, 'translation and interpreter situation');
-    if (e.meaning) assert.ok(by.explain.text.includes('JH Medics defines it as:'), 'template explanation quotes the source, labelled');
+    if (e.meaning) assert.ok(by.explain.text.includes('The course, JH Medics Volume 1, gives this meaning:'), 'template explanation quotes the source, labelled');
     assert.ok(new Set(l.steps.map((s) => s.text)).size <= 8, `word ${e.position}: at most 8 TTS requests`);
     assert.ok(by.recap.text.includes(e.mandarin.trim()), 'the recap says the word again');
     for (const s of l.steps) {
@@ -145,12 +145,13 @@ test('the Qwen writer: generates the teaching layer (the curriculum has no examp
   assert.equal(r.content.explanation_en, TEACHER_SHIDAO.explanation_en);
   assert.deepEqual(r.content.dialogue, TEACHER_SHIDAO.dialogue);
   const prompt = good.calls[0].messages[0].content;
-  assert.match(prompt, /JH Medics has no examples, so the explanation and examples are yours/);
-  assert.match(prompt, /containing the exact Mandarin term/);
+  assert.match(prompt, /The document usually has no explanations or examples, so the explanation and examples are yours/);
+  assert.match(prompt, /You teach every course and every entry the same way/);
+  assert.match(prompt, /containing the exact Mandarin item/);
   assert.match(prompt, /do not invent unsupported medical facts/);
   assert.match(prompt, /Stay in medical communication/);
   const facts = JSON.parse(good.calls[0].messages[1].content);
-  assert.deepEqual([facts.mandarin, facts.pinyin, facts.english, facts.jh_medics_meaning], ['食道', SHIDAO.pinyin, SHIDAO.english, SHIDAO.meaning], 'the curriculum entry is what Qwen teaches from');
+  assert.deepEqual([facts.mandarin, facts.pinyin, facts.english, facts.meaning_from_the_document], ['食道', SHIDAO.pinyin, SHIDAO.english, SHIDAO.meaning], 'the curriculum entry is what Qwen teaches from');
 
   const noDialogue = await createListenWriter({ client: fakeClient([{ ...reply, dialogue: [{ speaker: '医生', zh: 'bad', en: 'x' }] }]), env: {}, log: quietLog }).write(SHIDAO);
   assert.equal(noDialogue.source, 'teacher', 'a bad dialogue alone does not reject the lesson');

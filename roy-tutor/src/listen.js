@@ -1,8 +1,10 @@
 // Listen & Learn: a spoken lesson for one curriculum entry. Roy only listens;
 // nothing is asked and nothing is recorded, so the microphone is never used.
+// The same lesson structure for every course (JH Medics Volume 1 or any other
+// document): only the entries change.
 //
-// From the curriculum (JH Medics Volume 1 is the source of truth): the term,
-// its pinyin, the English and the medical meaning. From the AI teacher
+// From the course document (the source of truth): the item (a word, phrase or
+// sentence), its pinyin, the English and the meaning. From the AI teacher
 // (written once per entry by Qwen, checked, stored; see listencontent.js): a
 // short explanation, practical usage, a natural sentence using the exact term
 // and its translation, an interpreter situation and, when useful, a short
@@ -32,6 +34,7 @@ export const REQUIRED_STEPS = ['intro', 'term', 'explain', 'sentence', 'sentence
 // A review lesson (start of a new study day) is the short version.
 export const REVIEW_STEPS = ['intro', 'term', 'explain', 'sentence', 'sentence-en', 'recap'];
 
+const HAN = /\p{Script=Han}/u;
 const SPEAKER_EN = { 医生: 'Doctor', 患者: 'Patient', 护士: 'Nurse', 翻译: 'Interpreter', 家属: 'Family member' };
 const sentenceEnd = (t) => (/[.!?]$/.test(t) ? t : `${t}.`);
 
@@ -51,7 +54,11 @@ export function listenLesson(entry, total, content, { review = false } = {}) {
   const add = (kind, lang, text, show, source, extra = {}) => { if (text) steps.push({ kind, lang, text, show, source, ...extra }); };
   const withPinyin = pinyin ? `${term}  ${pinyin}` : `${term}  (no pinyin in the source)`;
   const English = english ? english[0].toUpperCase() + english.slice(1) : '';
-  add('intro', 'zh', review ? `复习一个医学词语：${term}。` : `我们来学一个医学词语：${term}。`, withPinyin, 'curriculum');
+  // A word is introduced as a word; a phrase or sentence from the document as one.
+  const phrase = [...term].filter((c) => HAN.test(c)).length > 6 || /[，。？！、；：]/.test(term);
+  const what = phrase ? '一句医学用语' : '一个医学词语';
+  const said = /[。！？.!?]$/.test(term) ? term : `${term}。`; // no doubled full stop after a sentence item
+  add('intro', 'zh', review ? `复习${what}：${said}` : `我们来学${what}：${said}`, withPinyin, 'curriculum');
   add('term', 'zh', term, withPinyin, 'curriculum', { rate: 0.8 });
   if (review) {
     add('explain', 'en', `Review. ${English ? sentenceEnd(English) : ''} For example:`.replace(/\s+/g, ' '), english || '(no English in the source)', 'curriculum');
@@ -68,7 +75,7 @@ export function listenLesson(entry, total, content, { review = false } = {}) {
     add('dialogue', 'zh', dialogue.map((l) => `${l.speaker}：${l.zh}`).join(' '), shown, from);
     add('dialogue-en', 'en', dialogue.map((l) => `${SPEAKER_EN[l.speaker] ?? l.speaker}: ${sentenceEnd(l.en)}`).join(' '), shown, from);
   }
-  add('recap', 'zh', `再听一次：${term}。${content.sentence_zh}`, `${withPinyin}\n${content.sentence_zh}`, from, { rate: 0.9 });
+  add('recap', 'zh', `再听一次：${said}${content.sentence_zh}`, `${withPinyin}\n${content.sentence_zh}`, from, { rate: 0.9 });
 
   return {
     position: entry.position,

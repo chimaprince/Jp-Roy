@@ -1,8 +1,11 @@
 # Roy Medical Chinese Tutor
 
-A voice-first tutor that teaches Roy medical Mandarin from **JH Medics Volume 1**
-(385 entries), one word at a time, in book order. Two ways to learn, sharing one
-place in the curriculum:
+A voice-first tutor: **one permanent AI teacher** for any medical-Chinese course
+document. The document is **what** Roy learns; the teacher is **how** he is
+taught, and that never changes. The first course is **JH Medics Volume 1**
+(385 entries); when it is finished, Roy hands the teacher the next document
+(see "Courses"). Items are taught one at a time, in the document's order. Two
+ways to learn, sharing one place in the course:
 
 - **🎙 Interactive Practice**: a spoken conversation with an AI teacher (Qwen).
   Roy says the word, explains it, uses it in a sentence and role-plays it.
@@ -305,7 +308,7 @@ end (`ended` while the element holds that clip). Duplicate, stray or late
 `ended` events, and anything from a clip that Pause, Repeat, Next or Exit
 cancelled, are ignored, so nothing can skip a clip or a word.
 
-The page shows its version under the title ("Version 1.0.7 (commit 1a2b3c4)")
+The page shows its version under the title ("Version 1.1.0 (commit 1a2b3c4)")
 and at the bottom. `https://localhost:3443/api/version` returns the same version
 and commit, and the server prints them at startup together with the folder it
 serves the page from. If the page and the server differ, a notice says so.
@@ -424,6 +427,42 @@ practised, confidence, weak), `study_sessions` (Interactive sessions: words
 studied/reviewed, weak words, summary, lesson state), `listen_content`
 (teacher-written Listen & Learn material) and `listen_log` (finished Listen
 lessons by date), `listen_state` (the day's Listen review).
+
+## Courses: one teacher, any document
+
+The teaching is the same code for every course: the Qwen teacher
+(`src/teacher.js`), the lesson writer (`src/listencontent.js`), the Listen &
+Learn lesson (`src/listen.js`), Interactive Practice, correction, role-play
+and the new-day review. A course document only supplies the items (a word,
+phrase or sentence), their pinyin, English and meaning, and their order. If a
+document gives little (only `硬膜外 yìng mó wài epidural`), the teacher still
+teaches it fully: explanation, practical usage, example sentence, translation,
+medical and interpreter situation, dialogue. That material is generated, kept
+separate, and labelled as the AI teacher's, never as the document's.
+
+**Add a course** (in `roy-tutor`, with the tutor stopped):
+
+```
+npm run course -- add "C:\path\to\JH Medics Volume 2.docx" --title "JH Medics Volume 2"
+npm run course -- list
+npm run course -- activate jh-medics-volume-2
+```
+
+- `add` reads the document, shows how many items it found (and the first ones),
+  saves it as `data/<id>.json`, lists it in `data/courses.json` and loads it.
+  It is **waiting**, not active: the course being studied never changes by
+  itself. Add `--activate` to switch at once.
+- `activate` makes one course the active one. Every course keeps its own place
+  and progress; switching back continues where you stopped.
+- Documents it reads: **.docx** (a table with one item per row, in any column
+  order, with or without headers; or one item per paragraph), **.txt** (one item
+  per line: `挂号 guà hào register: meaning`), **.csv / .tsv**, **.json**. A
+  **.pdf** cannot be read reliably: open it in Word, save as .docx, add that.
+- The same reader rebuilds JH Medics Volume 1 from its original Word file
+  exactly (385 of 385 entries; a test checks this).
+- Nothing in a document is corrected or invented. A missing pinyin, English or
+  meaning stays missing (the page says "no pinyin in the source"), and `add`
+  reports how many are missing.
 
 ## Curriculum
 

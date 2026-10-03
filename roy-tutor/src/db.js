@@ -9,7 +9,7 @@ CREATE TABLE IF NOT EXISTS courses (
   requires    TEXT REFERENCES courses(id)
 );
 
--- One row per JH Medics entry. Text columns hold the source wording verbatim.
+-- One row per curriculum entry (any course). Text columns hold the source wording verbatim.
 CREATE TABLE IF NOT EXISTS curriculum (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   course_id   TEXT NOT NULL REFERENCES courses(id),

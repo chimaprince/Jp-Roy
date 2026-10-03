@@ -31,7 +31,7 @@ export async function startListenQwen({ interactive = null, ttsDelayMs = 0, ttsF
   const http = await import('node:http');
   const { encodeWav } = await import('../public/voice-core.js');
   const wav = Buffer.from(encodeWav(Float32Array.from({ length: Math.round(24000 * clipSeconds) }, (_, i) => 0.2 * Math.sin(i / 8)), 24000)); // each clip: clipSeconds long
-  const seen = { writer: [], tts: 0, teacherTurns: 0, teacher: [], asrAudio: [], ttsText: [], ttsInFlight: 0, ttsPeak: 0, tts429: 0 };
+  const seen = { writer: [], writerRequests: [], teacherSystem: [], tts: 0, teacherTurns: 0, teacher: [], asrAudio: [], ttsText: [], ttsInFlight: 0, ttsPeak: 0, tts429: 0 };
   const decision = (over) => ({
     intent: 'answer', understood: true, correct: null, needs_retry: false, exercise_complete: false,
     next_action: 'same_exercise', student_confidence: 'ok', jump_target: null, roleplay_role: null, notes: '', ...over,
@@ -57,6 +57,7 @@ export async function startListenQwen({ interactive = null, ttsDelayMs = 0, ttsF
       if (/You write the teaching layer/.test(body.messages[0].content)) {
         const e = JSON.parse(body.messages[1].content);
         seen.writer.push(e.mandarin);
+        seen.writerRequests.push({ system: body.messages[0].content, facts: e });
         const odd = seen.writer.length % 2 === 1; // every other word gets a mini-dialogue
         const content = {
           explanation_en: `In medical communication this term means ${e.english}.`,
@@ -69,6 +70,7 @@ export async function startListenQwen({ interactive = null, ttsDelayMs = 0, ttsF
         return json({ id: 'w', choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: JSON.stringify(content) } }] });
       }
       seen.teacherTurns += 1;
+      seen.teacherSystem.push(body.messages[0].content);
       if (interactive) {
         const ctx = JSON.parse(body.messages.at(-1).content);
         seen.teacher.push(ctx);

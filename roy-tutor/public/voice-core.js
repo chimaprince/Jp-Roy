@@ -266,6 +266,7 @@ export class ListenController {
       completed: this.completed,
       problem: this.state === 'paused' ? this.problem : null,
       loadingTarget: this.state === 'loading' ? this.loadingTarget ?? null : null,
+      courseTitle: this.lesson?.course?.title ?? null,
     };
   }
 
@@ -441,7 +442,7 @@ export function listenStatusText(view) {
       if (view.problem === 'rate_limited') return `Audio temporarily unavailable: Qwen's voice is busy (rate limit). ${here} is not complete. Wait a moment, then ↻ Retry.`;
       if (view.problem === 'not_saved') return `${here} was heard in full but could not be saved. ↻ Retry saves it.`;
       return here ? `Paused at ${here}. ▶ Play to continue.` : 'Paused. ▶ Play to continue.';
-    case 'finished': return `${here} complete. That was the last word of JH Medics Volume 1.`;
+    case 'finished': return `${here} complete. That was the last item of ${view.courseTitle ?? 'this course'}.`;
     default: return '';
   }
 }
@@ -459,4 +460,4 @@ export function listenWhereText(lesson, place, listened = 0) {
 
 // Version of the page code; the server reports its own (package.json). A
 // difference means an old page or an old server process: reload / restart.
-export const CLIENT_VERSION = '1.0.7';
+export const CLIENT_VERSION = '1.1.0';

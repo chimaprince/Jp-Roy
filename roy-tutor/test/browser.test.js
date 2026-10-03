@@ -139,9 +139,9 @@ async function openPage(url, { route, using = browser } = {}) {
 const state = (re) => (e) => e.kind === 'state' && re.test(e.text);
 const place = async (url) => (await (await fetch(`${url}/api/status`)).json()).position;
 
-async function withServer(fn, qwenOptions) {
+async function withServer(fn, qwenOptions, serverEnv = {}) {
   const q = await startListenQwen(qwenOptions);
-  const s = await startTutorServer(q.port);
+  const s = await startTutorServer(q.port, serverEnv);
   try { await fn(s, q); } finally { await s.stop(); await q.close(); }
 }
 
@@ -449,6 +449,43 @@ test('browser: stray, duplicate or stale "ended" events cannot skip a clip or a 
       await p.page.close();
     }
   }, { clipSeconds: 1 });
+});
+
+test('browser: a SECOND course document gets the same teacher: Listen & Learn plays its items 1 → 2 → 3 → 4 by itself, to the end of that course', { skip }, async () => {
+  // A second course, added and activated with the course command (as Roy would).
+  const { execFileSync } = await import('node:child_process');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'roy-2nd-'));
+  const dataDir = path.join(dir, 'data');
+  fs.mkdirSync(dataDir);
+  for (const f of ['courses.json', 'jh-medics-vol1.json']) fs.copyFileSync(new URL(`../data/${f}`, import.meta.url), path.join(dataDir, f));
+  fs.writeFileSync(path.join(dir, 'clinic.txt'), 'Clinic Phrases\n挂号 guà hào register (at the hospital)\n发烧 fā shāo fever\n请把袖子卷起来。 qǐng bǎ xiù zi juǎn qǐ lái Please roll up your sleeve.\n预约 make an appointment\n');
+  const cmd = (...a) => execFileSync(process.execPath, ['--disable-warning=ExperimentalWarning', 'scripts/course.mjs', ...a], { cwd: new URL('..', import.meta.url).pathname, env: { ...process.env, TUTOR_DATA_DIR: dataDir, TUTOR_DB: path.join(dir, 'c.db') }, encoding: 'utf8' });
+  cmd('add', path.join(dir, 'clinic.txt'), '--title', 'Clinic Phrases', '--activate');
+  await withServer(async (s, q) => {
+    const p = await openPage(s.url);
+    try {
+      await p.page.waitForFunction(() => document.getElementById('course').textContent === 'CLINIC PHRASES');
+      await p.waitFor('the page shows item 1 of 4', (e) => e.kind === 'progress' && e.text === 'Progress: Word 1 of 4');
+      await p.page.click('#mode-listen'); // the only click
+      await p.waitFor('item 1 playing', state(/^Playing Word 1 of 4 · part 1 of/));
+      assert.match(await p.page.textContent('#listen-source'), /^From Clinic Phrases$/);
+      await p.waitFor('item 2 by itself', state(/^Playing Word 2 of 4 · part 1 of/));
+      await p.waitFor('item 3 by itself', state(/^Playing Word 3 of 4 · part 1 of/));
+      await p.waitFor('item 4 by itself', state(/^Playing Word 4 of 4 · part 1 of/));
+      await p.waitFor('the end of this course', state(/^Word 4 complete\. That was the last item of Clinic Phrases\.$/));
+      assert.deepEqual(await p.texts('click'), ['mode-listen'], 'no other click');
+      assert.deepEqual(p.completes().map((c) => c.position), [1, 2, 3, 4]);
+      // Taught, not just read: the same teaching layer as JH Medics, anchored to this document's items.
+      assert.ok(q.seen.ttsText.includes('我们来学一个医学词语：挂号。'));
+      assert.ok(q.seen.ttsText.includes('我们来学一句医学用语：请把袖子卷起来。'), 'a sentence item is introduced as a phrase');
+      assert.ok(q.seen.ttsText.some((t) => t.startsWith('Register (at the hospital). In medical communication this term means register (at the hospital).')));
+      assert.deepEqual(q.seen.writer, ['挂号', '发烧', '请把袖子卷起来。', '预约'], 'the teaching layer written for each item, in the document order');
+      assert.ok(q.seen.writerRequests.every((w) => w.facts.course === 'Clinic Phrases'));
+      assert.equal(q.seen.ttsPeak, 1);
+    } finally {
+      await p.page.close();
+    }
+  }, {}, { TUTOR_DATA_DIR: dataDir });
 });
 
 // The whole sequence in one sitting, as Roy would use it (Phase 22 of the brief).

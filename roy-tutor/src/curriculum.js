@@ -55,7 +55,7 @@ export function validateEntries(rawEntries) {
     const blank = (v) => v === undefined || v === null || v === '';
     if (blank(e.pinyin)) warnings.push(`position ${e.position} (${e.english}): no pinyin in the source`);
     else if (typeof e.pinyin !== 'string') errors.push(`position ${e.position}: pinyin must be text`);
-    if (blank(e.meaning)) warnings.push(`position ${e.position} (${e.english}): no JH Medics meaning supplied`);
+    if (blank(e.meaning)) warnings.push(`position ${e.position} (${e.english}): no meaning in the source`);
     return {
       position,
       english: e.english,

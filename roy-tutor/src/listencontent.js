@@ -1,10 +1,12 @@
 // Listen & Learn: the AI teacher's teaching layer for one curriculum entry.
-// JH Medics Volume 1 is the source of truth for the term, its pinyin, English,
-// medical meaning and order, but it has no explanations or example sentences.
-// So the Qwen teacher writes, once per entry (server-side):
+// The same teacher, the same prompt and the same checks for EVERY course: JH
+// Medics Volume 1 or any other document Roy loads. The course document is the
+// source of truth for the item (a word, phrase or sentence), its pinyin,
+// English, meaning and order, but usually has no explanations or examples. So
+// the Qwen teacher writes, once per entry (server-side):
 //
-//   explanation_en  1-2 sentences: what the term means in medical
-//                   communication, built on the JH Medics meaning
+//   explanation_en  1-2 sentences: what the item means in medical
+//                   communication, built on the document's meaning
 //   usage_en        where and how the term is actually used (practical usage)
 //   sentence_zh     one short, natural Mandarin sentence with the EXACT term
 //   sentence_en     its English translation
@@ -18,12 +20,14 @@
 // quota. If Qwen is unavailable or its reply fails the checks twice, a plain
 // template is used for this lesson only (not stored), and the next listen
 // tries Qwen again. The curriculum itself is never changed, and nothing the
-// teacher wrote is presented as coming from JH Medics.
+// teacher wrote is presented as coming from the course document.
 import OpenAI from 'openai';
 import { qwenSettings, qwenClient } from './teacher.js';
 
 const HAN = /\p{Script=Han}/u;
 const MAX_SENTENCE_CHARS = 40;
+// A long item (a phrase or sentence from the document) may need a longer example.
+const maxSentence = (term) => Math.max(MAX_SENTENCE_CHARS, [...term].length + 30);
 const MAX_ENGLISH_CHARS = 400;
 const MAX_DIALOGUE_LINES = 4;
 export const SPEAKERS = ['医生', '患者', '护士', '翻译', '家属'];
@@ -31,17 +35,17 @@ export const SPEAKERS = ['医生', '患者', '护士', '翻译', '家属'];
 export const CONTENT_VERSION = 2;
 const ENGLISH_FIELDS = ['explanation_en', 'usage_en', 'sentence_en', 'context_en'];
 
-export const LISTEN_WRITER_PROMPT = `You are Roy's medical Mandarin teacher. Roy is an English-speaking medical interpreter learning medical Mandarin from the JH Medics Volume 1 curriculum. You write the teaching layer for one curriculum entry, which Roy will hear as an audio lesson.
+export const LISTEN_WRITER_PROMPT = `You are Roy's medical Mandarin teacher. Roy is an English-speaking medical interpreter learning medical Mandarin from course documents (for example JH Medics Volume 1). You write the teaching layer for one curriculum entry, which Roy will hear as an audio lesson. You teach every course and every entry the same way.
 
-You get one entry: English, Mandarin, pinyin and the JH Medics meaning. The entry is the source of truth: never change or correct it. JH Medics has no examples, so the explanation and examples are yours; keep them medically sound and consistent with the JH Medics meaning, and do not invent unsupported medical facts. Stay in medical communication (hospital, clinic, doctor, patient, nurse, interpreter). If the term is broad, say so briefly.
+You get one entry from the course document: the item in Mandarin (a word, phrase or sentence), its pinyin, its English, the meaning the document gives, and the course title. The entry is the source of truth: never change or correct it. The document usually has no explanations or examples, so the explanation and examples are yours; keep them medically sound and consistent with the entry, and do not invent unsupported medical facts. Stay in medical communication (hospital, clinic, doctor, patient, nurse, interpreter). If the item is broad or also used outside medicine, say so briefly. If the document gives little information, still teach it fully from the item itself.
 
 Write one JSON object with:
-- explanation_en: one or two short sentences, English only: what this term means in medical communication, built on the JH Medics meaning.
-- usage_en: one or two short sentences, English only: where and how the term is actually used (which situations, departments, conversations).
-- sentence_zh: ONE short, natural Mandarin sentence (at most ${MAX_SENTENCE_CHARS} characters) that a doctor, nurse, patient or interpreter would really say, containing the exact Mandarin term, character for character. Simple everyday words around it; no other specialist terms. Chinese characters and Chinese punctuation only: no pinyin, no English.
+- explanation_en: one or two short sentences, English only: what this item means in medical communication, built on the document's meaning.
+- usage_en: one or two short sentences, English only: where and how it is actually used (which situations, departments, conversations).
+- sentence_zh: ONE short, natural Mandarin sentence (at most ${MAX_SENTENCE_CHARS} characters, or a little longer if the item itself is long) that a doctor, nurse, patient or interpreter would really say, containing the exact Mandarin item, character for character. Simple everyday words around it; no other specialist terms. Chinese characters and Chinese punctuation only: no pinyin, no English.
 - sentence_en: its English translation. English only.
-- context_en: one short sentence, English only: a practical situation where Roy, as an interpreter, would hear or need this term.
-- dialogue: a short exchange ONLY when it genuinely helps (otherwise []): 2 to ${MAX_DIALOGUE_LINES} lines, each {"speaker": one of ${SPEAKERS.join(' / ')}, "zh": a short Mandarin line (Chinese only, at most ${MAX_SENTENCE_CHARS} characters), "en": its English translation}. At least one line contains the exact term.
+- context_en: one short sentence, English only: a practical situation where Roy, as an interpreter, would hear or need this item.
+- dialogue: a short exchange ONLY when it genuinely helps (otherwise []): 2 to ${MAX_DIALOGUE_LINES} lines, each {"speaker": one of ${SPEAKERS.join(' / ')}, "zh": a short Mandarin line (Chinese only), "en": its English translation}. At least one line contains the exact item.
 
 Reply with the JSON object only: {"explanation_en": "...", "usage_en": "...", "sentence_zh": "...", "sentence_en": "...", "context_en": "...", "dialogue": []}`;
 
@@ -57,7 +61,7 @@ export function checkListenContent(entry, c) {
   if (!zh) problems.push('sentence_zh is missing');
   else {
     if (!zh.includes(term)) problems.push(`sentence_zh must contain the exact term ${term}`);
-    if ([...zh].length > MAX_SENTENCE_CHARS) problems.push(`sentence_zh is longer than ${MAX_SENTENCE_CHARS} characters`);
+    if ([...zh].length > maxSentence(term)) problems.push(`sentence_zh is longer than ${maxSentence(term)} characters`);
     if (!chineseOnly(zh, term)) problems.push('sentence_zh must not contain pinyin or English');
   }
   for (const k of ENGLISH_FIELDS) {
@@ -75,23 +79,23 @@ export function cleanDialogue(entry, dialogue) {
   if (!Array.isArray(dialogue) || dialogue.length < 2 || dialogue.length > MAX_DIALOGUE_LINES) return [];
   const term = String(entry.mandarin || '').trim();
   const lines = dialogue.map((l) => ({ speaker: text(l?.speaker), zh: text(l?.zh), en: text(l?.en) }));
-  const ok = lines.every((l) => SPEAKERS.includes(l.speaker) && l.zh && l.en && [...l.zh].length <= MAX_SENTENCE_CHARS
+  const ok = lines.every((l) => SPEAKERS.includes(l.speaker) && l.zh && l.en && [...l.zh].length <= maxSentence(term)
     && chineseOnly(l.zh, term) && HAN.test(l.zh) && !HAN.test(l.en) && l.en.length <= MAX_ENGLISH_CHARS);
   return ok && lines.some((l) => l.zh.includes(term)) ? lines : [];
 }
 
 // Used when the teacher is unavailable: plain and always correct, uses the
 // exact term, adds nothing beyond the curriculum entry.
-export function templateContent(entry) {
+export function templateContent(entry, { courseTitle = null } = {}) {
   const english = String(entry.english || 'this term').trim();
   const meaning = String(entry.meaning || '').trim();
   return {
     v: CONTENT_VERSION,
-    explanation_en: meaning ? `JH Medics defines it as: ${meaning}` : `It means ${english}.`,
-    usage_en: `You will hear this term when doctors, nurses and patients talk about ${english}.`,
+    explanation_en: meaning ? `${courseTitle ? `The course, ${courseTitle},` : 'The course'} gives this meaning: ${meaning}` : `It means ${english}.`,
+    usage_en: `You will hear this when doctors, nurses and patients talk about ${english}.`,
     sentence_zh: `医生今天跟病人谈到了${String(entry.mandarin).trim()}。`,
     sentence_en: `Today the doctor talked with the patient about ${english}.`,
-    context_en: `As an interpreter, listen for this term whenever ${english} comes up in a consultation.`,
+    context_en: `As an interpreter, listen for this whenever ${english} comes up in a consultation.`,
     dialogue: [],
     source: 'template',
   };
@@ -108,9 +112,9 @@ export function createListenWriter({ client, env = process.env, log = console } 
     configured,
     model: q.model,
     // Returns { content, source: 'teacher' | 'template' }.
-    async write(entry) {
-      if (!configured) return { content: templateContent(entry), source: 'template' };
-      const facts = { english: entry.english, mandarin: entry.mandarin, pinyin: entry.pinyin || null, jh_medics_meaning: entry.meaning ?? null };
+    async write(entry, { courseTitle = null } = {}) {
+      if (!configured) return { content: templateContent(entry, { courseTitle }), source: 'template' };
+      const facts = { course: courseTitle, position: entry.position, mandarin: entry.mandarin, pinyin: entry.pinyin || null, english: entry.english, meaning_from_the_document: entry.meaning ?? null };
       const messages = [
         { role: 'system', content: LISTEN_WRITER_PROMPT },
         { role: 'user', content: JSON.stringify(facts) },
@@ -137,7 +141,7 @@ export function createListenWriter({ client, env = process.env, log = console } 
           if (text) messages.push({ role: 'assistant', content: text }, { role: 'user', content: 'That was not valid JSON. Send the JSON object only.' });
         }
       }
-      return { content: templateContent(entry), source: 'template' };
+      return { content: templateContent(entry, { courseTitle }), source: 'template' };
     },
   };
 }

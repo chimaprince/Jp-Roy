@@ -51,9 +51,9 @@ export function asrEndpointProblem(url) {
 }
 
 // Recognition context for Mandarin medical Chinese: what the lesson is about
-// and the current JH Medics term, so the recogniser expects it.
+// and the current curriculum item, so the recogniser expects it (any course).
 export function asrContext(entry) {
-  const parts = ['医学中文课（JH Medics 医学术语）。学生在练习医学普通话，可能说普通话，也可能说英语。'];
+  const parts = ['医学中文课（医学术语和医患对话）。学生在练习医学普通话，可能说普通话，也可能说英语。'];
   if (entry?.mandarin) {
     const extra = [entry.pinyin, entry.english].filter(Boolean).join('，');
     parts.push(`当前术语：${entry.mandarin}${extra ? `（${extra}）` : ''}。`);

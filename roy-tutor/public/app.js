@@ -145,7 +145,7 @@ function renderView(view) {
   $('card-mandarin').textContent = card.mandarin ?? '？';
   $('card-pinyin').textContent = card.pinyin ?? '';
   $('card-english').textContent = card.english ?? '？';
-  $('card-meaning').textContent = card.meaning ?? (card.english ? 'JH Medics meaning not loaded yet' : '');
+  $('card-meaning').textContent = card.meaning ?? (card.english ? '(no meaning in the course document)' : '');
   const tag = view.jump ? 'Side trip: your curriculum place is saved' : view.stage === 'conversation' ? `Role-play: you are the ${view.role.toLowerCase()}` : '';
   $('card-tag').textContent = tag;
   $('card-tag').hidden = !tag;
@@ -598,7 +598,7 @@ if (!window.isSecureContext) {
 }
 // ---------- choosing a mode: Interactive Practice or Listen & Learn ----------
 //
-// Both modes share Roy's curriculum position (JH Medics word 1 → 385).
+// Both modes share Roy's curriculum position in the active course (word 1 → last).
 
 let learnMode = null; // null (home), 'interactive' or 'listen'
 // Latest from the server's completion replies (lessons are fetched ahead, so
@@ -724,8 +724,9 @@ function renderListen(view) {
   nowEl.textContent = step ? step.show || step.text : '';
   nowEl.classList.toggle('zh', step?.lang === 'zh');
   nowEl.lang = step?.lang === 'zh' ? 'zh-CN' : 'en';
-  $('listen-source').textContent = step?.source === 'teacher' ? 'Explanation and examples by the AI teacher (the term, pinyin, English and meaning are from JH Medics)'
-    : step?.source === 'template' ? 'Simple example (the AI teacher was unavailable)' : step?.source === 'curriculum' ? 'From JH Medics Volume 1' : '';
+  const book = lesson?.course?.title ?? 'the course document';
+  $('listen-source').textContent = step?.source === 'teacher' ? `Explanation and examples by the AI teacher (the item, pinyin, English and meaning are from ${book})`
+    : step?.source === 'template' ? 'Simple example (the AI teacher was unavailable)' : step?.source === 'curriculum' ? `From ${book}` : '';
   $('listen-state').dataset.state = view.state;
   $('listen-state').textContent = listenStatusText(view);
   $('listen-play').disabled = view.state === 'playing' || view.state === 'loading';

@@ -35,7 +35,11 @@ const SETUP_PORT = process.env.TUTOR_SETUP_PORT || '3000';
 const DEV_CA_FINGERPRINT = process.env.TUTOR_DEV_CA_FINGERPRINT || '';
 
 const db = openDb(process.env.TUTOR_DB || path.join(here, 'tutor.db'));
-for (const r of loadConfiguredCourses(db, path.join(here, 'data'))) {
+// The courses (data/courses.json): any number of course documents, one active
+// at a time; every course is taught by the same teacher. TUTOR_DATA_DIR points
+// to another data folder (tests use this).
+const dataDir = path.resolve(process.env.TUTOR_DATA_DIR || path.join(here, 'data'));
+for (const r of loadConfiguredCourses(db, dataDir)) {
   if (!r.ok) { console.error(`Curriculum ${r.course} failed to load:`, r.errors); process.exit(1); }
   console.log(`Curriculum ${r.course}: ${r.count} entries`);
   r.warnings.forEach((w) => console.warn(`  note: ${w}`));
@@ -146,15 +150,16 @@ const routes = {
 const listenWriter = createListenWriter();
 const writing = new Map(); // entry id -> pending example, so each word is written once
 
-async function listenContent(entry, { generate }) {
+async function listenContent(entry, { generate, courseTitle }) {
   const saved = getListenContent(db, entry.id);
   if (isCurrent(saved)) return saved;
   // Nothing stored yet, or stored before explanations existed: the old
   // sentence is kept (with the plain explanation) until Qwen writes it anew.
-  const fallback = saved ? { ...templateContent(entry), ...saved, v: CONTENT_VERSION, dialogue: [] } : templateContent(entry);
+  const plain = templateContent(entry, { courseTitle });
+  const fallback = saved ? { ...plain, ...saved, v: CONTENT_VERSION, dialogue: [] } : plain;
   if (!generate) return fallback;
   if (!writing.has(entry.id)) {
-    writing.set(entry.id, listenWriter.write(entry).then(({ content, source }) => {
+    writing.set(entry.id, listenWriter.write(entry, { courseTitle }).then(({ content, source }) => {
       if (source === 'teacher') saveListenContent(db, entry.id, content, listenWriter.model);
       return source === 'teacher' ? content : fallback;
     }).finally(() => writing.delete(entry.id)));
@@ -186,7 +191,7 @@ async function listenRoute(url) {
   if (!Number.isInteger(position) || position < 1 || position > plan.total) throw badRequest(`Word ${raw} is not in the curriculum (1-${plan.total}).`);
   const entry = entryAt(db, course.id, position);
   const textOnly = url.searchParams.get('audio') === '0';
-  const content = await listenContent(entry, { generate: !textOnly });
+  const content = await listenContent(entry, { generate: !textOnly, courseTitle: course.title });
   const lesson = listenLesson(entry, plan.total, content, { review });
   // What plays after this lesson: the next review word, then the current
   // word; after a word, the one after it (in curriculum order).
@@ -197,7 +202,7 @@ async function listenRoute(url) {
   } else if (position < plan.total) {
     next = { position: position + 1, review: false };
   }
-  const body = { ...lesson, review, next, reviewCount: plan.review.length, reviewIndex: review ? plan.review.indexOf(position) : null, ...tutor.listenProgress() };
+  const body = { ...lesson, course: { id: course.id, title: course.title }, review, next, reviewCount: plan.review.length, reviewIndex: review ? plan.review.indexOf(position) : null, ...tutor.listenProgress() };
   return textOnly ? body : speech.attachTo(body, 'steps');
 }
 

@@ -1,8 +1,8 @@
 {
   "name": "roy-medical-chinese-tutor",
-  "version": "1.0.7",
+  "version": "1.1.0",
   "private": true,
-  "description": "Voice-first medical Chinese tutor for Roy, driven by the JH Medics Volume 1 curriculum.",
+  "description": "Voice-first medical Chinese tutor for Roy: one permanent AI teacher for any course document (first course: JH Medics Volume 1).",
   "type": "module",
   "engines": {
     "node": ">=22.5"
@@ -14,7 +14,8 @@
     "test": "node --disable-warning=ExperimentalWarning --test test/*.test.js",
     "check-ai": "node --disable-warning=ExperimentalWarning scripts/check-ai.mjs",
     "try-word1": "node --disable-warning=ExperimentalWarning scripts/try-word1.mjs",
-    "check-voice": "node --disable-warning=ExperimentalWarning scripts/check-voice.mjs"
+    "check-voice": "node --disable-warning=ExperimentalWarning scripts/check-voice.mjs",
+    "course": "node --disable-warning=ExperimentalWarning scripts/course.mjs"
   },
   "dependencies": {
     "node-forge": "^1.4.0",

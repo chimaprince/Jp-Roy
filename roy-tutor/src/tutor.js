@@ -76,7 +76,7 @@ function practicalUsage(db, entry) {
   const c = store.getListenContent(db, entry.id);
   if (!c?.sentence_zh || !c.sentence_zh.includes(entry.mandarin)) return null;
   return {
-    written_by: 'the AI teacher (not JH Medics)',
+    written_by: 'the AI teacher (not the course document)',
     explanation_en: c.explanation_en ?? null,
     usage_en: c.usage_en ?? null,
     sentence_zh: c.sentence_zh,
@@ -123,7 +123,7 @@ export class Tutor {
     this.#requireTeacher();
     const course = store.activeCourse(this.db);
     if (!course || store.courseLength(this.db, course.id) === 0) {
-      return { say: [{ lang: 'en', text: 'No curriculum is loaded yet. Please import JH Medics Volume 1.' }], listen: null };
+      return { say: [{ lang: 'en', text: 'No course is loaded yet. Add a course document first.' }], listen: null };
     }
     const progress = store.getProgress(this.db, this.userId, course.id);
     const existing = this.#activeSession(course, progress);

@@ -96,7 +96,7 @@ test('practical usage: the sentence step teaches usage first, with the stored ex
   assert.match(ctx.if_complete.instruction, /practical usage/);
   assert.match(ctx.if_complete.instruction, /exact term/);
   assert.deepEqual(ctx.current_entry.practical_usage, {
-    written_by: 'the AI teacher (not JH Medics)',
+    written_by: 'the AI teacher (not the course document)',
     explanation_en: 'Medicine given into the epidural space for pain relief.',
     usage_en: 'Used in labour and surgery.',
     sentence_zh: '我们需要给你做硬膜外麻醉。',

@@ -1,7 +1,10 @@
 # Curriculum data
 
-`courses.json` lists which courses the app loads. Only **JH Medics Volume 1**
-is listed, and it is the only `active` course. Volume 2 must not be listed yet.
+`courses.json` lists which courses the app loads: one `active` course, any
+number of `staged` (waiting) ones. Today only **JH Medics Volume 1** is listed,
+and it is active. Further documents are added with `npm run course -- add`
+(see the main README, "Courses"); they wait until activated. Every course is
+taught by the same teacher; a course only supplies its items and their order.
 
 `jh-medics-vol1.json` is the source of truth for the curriculum. Entries are
 taught strictly by `position`, from 1 to the last entry.
