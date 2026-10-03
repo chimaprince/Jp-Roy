@@ -27,10 +27,10 @@ export function cleanEnv() {
 // Every TTS call is counted (seen.tts), with its text (seen.ttsText) and the
 // highest number in flight at once (seen.ttsPeak). ttsDelayMs makes each call
 // take that long; ttsFail(text, n) can make a call answer 429 (return true).
-export async function startListenQwen({ interactive = null, ttsDelayMs = 0, ttsFail = null } = {}) {
+export async function startListenQwen({ interactive = null, ttsDelayMs = 0, ttsFail = null, clipSeconds = 0.1 } = {}) {
   const http = await import('node:http');
   const { encodeWav } = await import('../public/voice-core.js');
-  const wav = Buffer.from(encodeWav(Float32Array.from({ length: 2400 }, (_, i) => 0.2 * Math.sin(i / 8)), 24000)); // 0.1 s
+  const wav = Buffer.from(encodeWav(Float32Array.from({ length: Math.round(24000 * clipSeconds) }, (_, i) => 0.2 * Math.sin(i / 8)), 24000)); // each clip: clipSeconds long
   const seen = { writer: [], tts: 0, teacherTurns: 0, teacher: [], asrAudio: [], ttsText: [], ttsInFlight: 0, ttsPeak: 0, tts429: 0 };
   const decision = (over) => ({
     intent: 'answer', understood: true, correct: null, needs_retry: false, exercise_complete: false,

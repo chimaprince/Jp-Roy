@@ -99,3 +99,24 @@ test('HOST=127.0.0.1 keeps the server private to this computer', async () => {
     assert.equal((await fetch(`http://127.0.0.1:${s.port}/api/status`)).status, 200);
   } finally { await s.stop(); }
 });
+
+test('a second server on a busy port says an older tutor is still running (and exits) instead of crashing', async () => {
+  const { startListenQwen, startTutorServer } = await import('./helpers.js');
+  const q = await startListenQwen();
+  const first = await startTutorServer(q.port);
+  try {
+    const port = new URL(first.url).port;
+    const env = { ...cleanEnv(), TUTOR_ENV_FILE: 'none', PORT: port, HOST: '127.0.0.1', TUTOR_DB: ':memory:', TUTOR_AUDIO_CACHE: 'off' };
+    const second = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', 'server.js'], { cwd: new URL('..', import.meta.url).pathname, env });
+    let out = '';
+    second.stdout.on('data', (d) => { out += d; });
+    second.stderr.on('data', (d) => { out += d; });
+    const code = await new Promise((r) => second.on('exit', r));
+    assert.equal(code, 1);
+    assert.match(out, new RegExp(`Port ${port} is already in use: another Roy tutor server \\(probably an older version\\) is still running`));
+    assert.match(out, /Close that window/);
+  } finally {
+    await first.stop();
+    await q.close();
+  }
+});

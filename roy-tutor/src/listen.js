@@ -13,23 +13,24 @@
 // Mandarin voice reads letters oddly): it is shown on screen while the voice
 // says the characters. English lines contain only English.
 //
-// A lesson is a few natural segments (5 to 7), not one line per field, so a
-// word costs only 4 to 6 TTS requests; the term at the start and at the end is
-// the same audio (cached):
+// A lesson is a few natural segments (7 to 9), not one line per field, so a
+// word costs 6 to 8 TTS requests, each made once and cached:
 //
-//   1 term       the Mandarin term, slowly (pinyin on screen)
-//   2 explain    "Epidural. <what it means> <where it is used> For example:"
-//   3 sentence   the Mandarin example sentence
-//   4 sentence-en "That means: <translation>. <interpreter situation>"
-//   5 dialogue / dialogue-en   a short exchange, only when the teacher wrote one
-//   6 repeat     the term once more, slowly
+//   1 intro      "我们来学一个医学词语：硬膜外。" (Mandarin)
+//   2 term       the Mandarin term, slowly (pinyin on screen, never spoken)
+//   3 explain    "Epidural. <what it means> <where it is used> For example:"
+//   4 sentence   the Mandarin example sentence
+//   5 sentence-en "That means: <translation>. <interpreter situation>"
+//   6 dialogue / dialogue-en   a short exchange, only when the teacher wrote one
+//   7 recap      "再听一次：硬膜外。<the example sentence>" (Mandarin)
 //
-// Then the player moves on to the next word by itself (see ListenController).
+// When the last segment's audio has really ended, the player records the word
+// and moves on to the next word by itself (see ListenController).
 
 // Kinds of step that must be in every lesson (tests check these).
-export const REQUIRED_STEPS = ['term', 'explain', 'sentence', 'sentence-en', 'repeat'];
+export const REQUIRED_STEPS = ['intro', 'term', 'explain', 'sentence', 'sentence-en', 'recap'];
 // A review lesson (start of a new study day) is the short version.
-export const REVIEW_STEPS = ['term', 'explain', 'sentence', 'sentence-en', 'repeat'];
+export const REVIEW_STEPS = ['intro', 'term', 'explain', 'sentence', 'sentence-en', 'recap'];
 
 const SPEAKER_EN = { 医生: 'Doctor', 患者: 'Patient', 护士: 'Nurse', 翻译: 'Interpreter', 家属: 'Family member' };
 const sentenceEnd = (t) => (/[.!?]$/.test(t) ? t : `${t}.`);
@@ -50,8 +51,7 @@ export function listenLesson(entry, total, content, { review = false } = {}) {
   const add = (kind, lang, text, show, source, extra = {}) => { if (text) steps.push({ kind, lang, text, show, source, ...extra }); };
   const withPinyin = pinyin ? `${term}  ${pinyin}` : `${term}  (no pinyin in the source)`;
   const English = english ? english[0].toUpperCase() + english.slice(1) : '';
-  const onceMore = 'Once more:';
-
+  add('intro', 'zh', review ? `复习一个医学词语：${term}。` : `我们来学一个医学词语：${term}。`, withPinyin, 'curriculum');
   add('term', 'zh', term, withPinyin, 'curriculum', { rate: 0.8 });
   if (review) {
     add('explain', 'en', `Review. ${English ? sentenceEnd(English) : ''} For example:`.replace(/\s+/g, ' '), english || '(no English in the source)', 'curriculum');
@@ -60,15 +60,15 @@ export function listenLesson(entry, total, content, { review = false } = {}) {
       [english || '(no English in the source)', content.explanation_en, content.usage_en].filter(Boolean).join('\n\n'), from);
   }
   add('sentence', 'zh', content.sentence_zh, content.sentence_zh, from);
-  const tail = dialogue.length ? 'Here is a short conversation.' : onceMore;
+  const tail = dialogue.length ? 'Here is a short conversation.' : null;
   add('sentence-en', 'en', [`That means: ${sentenceEnd(content.sentence_en)}`, review ? null : content.context_en, tail].filter(Boolean).join(' '),
     [content.sentence_zh, content.sentence_en, review ? null : content.context_en].filter(Boolean).join('\n\n'), from);
   if (dialogue.length) {
     const shown = dialogue.map((l) => `${l.speaker}：${l.zh}\n${SPEAKER_EN[l.speaker] ?? l.speaker}: ${l.en}`).join('\n');
     add('dialogue', 'zh', dialogue.map((l) => `${l.speaker}：${l.zh}`).join(' '), shown, from);
-    add('dialogue-en', 'en', `${dialogue.map((l) => `${SPEAKER_EN[l.speaker] ?? l.speaker}: ${sentenceEnd(l.en)}`).join(' ')} ${onceMore}`, shown, from);
+    add('dialogue-en', 'en', dialogue.map((l) => `${SPEAKER_EN[l.speaker] ?? l.speaker}: ${sentenceEnd(l.en)}`).join(' '), shown, from);
   }
-  add('repeat', 'zh', term, withPinyin, 'curriculum', { rate: 0.8 });
+  add('recap', 'zh', `再听一次：${term}。${content.sentence_zh}`, `${withPinyin}\n${content.sentence_zh}`, from, { rate: 0.9 });
 
   return {
     position: entry.position,

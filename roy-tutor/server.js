@@ -300,6 +300,19 @@ const server = secure
 
 const setupPort = secure && DEV_CA && SETUP_PORT !== 'off' && Number(SETUP_PORT) !== PORT ? Number(SETUP_PORT) : null;
 
+// Another tutor (often an older version in another window) still has the port:
+// say so plainly instead of crashing, so the page is never served by an old server.
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`\n!! Port ${PORT} is already in use: another Roy tutor server (probably an older version) is still running.`);
+    console.error('   Close that window (or press Ctrl+C in it), then start the tutor again.');
+    console.error('   Until then the browser keeps talking to the OLD server and its old page.\n');
+  } else {
+    console.error(`!! The tutor could not start on port ${PORT}: ${err.code || err.message}`);
+  }
+  process.exit(1);
+});
+
 server.listen(PORT, HOST, () => {
   const urls = serverUrls({ host: HOST, port: server.address().port, secure });
   console.log(`Roy Medical Chinese tutor on ${urls.local}`);

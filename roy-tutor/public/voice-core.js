@@ -289,8 +289,9 @@ export class ListenController {
     const target = this.lesson?.next;
     if (!target || this.prefetched?.key === targetKey(target)) return;
     const promise = this.loadLesson(target);
-    promise.catch(() => { if (this.prefetched?.promise === promise) this.prefetched = null; });
-    this.prefetched = { key: targetKey(target), promise };
+    const entry = { key: targetKey(target), promise, first: null };
+    promise.then((l) => { entry.first = l?.steps?.[0] ?? null; }, () => { if (this.prefetched === entry) this.prefetched = null; });
+    this.prefetched = entry;
   }
 
   async open(target) {
@@ -324,7 +325,10 @@ export class ListenController {
     this.#prefetchNext();
     while (run === this.run && this.index < this.lesson.steps.length) {
       try {
-        await this.playStep(this.lesson.steps[this.index], { next: this.lesson.steps[this.index + 1] ?? null });
+        // Look ahead one clip: the next line, or on the last line the next
+        // word's first line (so the next word starts without a wait).
+        const upcoming = this.lesson.steps[this.index + 1] ?? (this.prefetched?.key === targetKey(this.lesson.next) ? this.prefetched.first : null);
+        await this.playStep(this.lesson.steps[this.index], { next: upcoming ?? null });
         if (run === this.run) this.played.add(this.index);
       } catch (err) {
         if (run !== this.run) return;
@@ -433,9 +437,9 @@ export function listenStatusText(view) {
     case 'playing': return `Playing ${here} · ${view.index + 1} of ${view.steps}`;
     case 'gap': return `${here} complete. Moving to ${wordName(view.next)}…`;
     case 'paused':
-      if (view.problem === 'audio') return `${here}: this line's audio could not be played, so ${here} is not complete. ▶ Play tries again · → Next skips it.`;
-      if (view.problem === 'rate_limited') return `Qwen's voice is busy right now (rate limit), so ${here} is paused, not complete. Wait a moment, then ▶ Play to retry.`;
-      if (view.problem === 'not_saved') return `${here} was heard in full but could not be saved. ▶ Play tries again.`;
+      if (view.problem === 'audio') return `Audio failed. ${here} is not complete. ↻ Retry plays it again · → Next skips it.`;
+      if (view.problem === 'rate_limited') return `Audio failed: Qwen's voice is busy right now (rate limit). ${here} is not complete. Wait a moment, then ↻ Retry.`;
+      if (view.problem === 'not_saved') return `${here} was heard in full but could not be saved. ↻ Retry saves it.`;
       return here ? `Paused at ${here}. ▶ Play to continue.` : 'Paused. ▶ Play to continue.';
     case 'finished': return `${here} complete. That was the last word of JH Medics Volume 1.`;
     default: return '';
@@ -455,4 +459,4 @@ export function listenWhereText(lesson, place, listened = 0) {
 
 // Version of the page code; the server reports its own (package.json). A
 // difference means an old page or an old server process: reload / restart.
-export const CLIENT_VERSION = '1.0.5';
+export const CLIENT_VERSION = '1.0.6';

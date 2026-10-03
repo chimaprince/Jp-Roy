@@ -223,7 +223,10 @@ function playUrl(url, rate, run) {
   return new Promise((resolve, reject) => {
     const mine = () => player.src === url;
     const cancel = setInterval(() => { if (run !== speechRun) { if (mine()) player.pause(); finish(); } }, 150);
-    const onEnded = () => { if (mine()) finish(); };
+    // Only a real end of THIS clip counts: the element holds this clip and has
+    // actually played to its end. A duplicate or stray 'ended' event (or one
+    // for an older clip) is ignored, so it can never skip a line or a word.
+    const onEnded = () => { if (mine() && player.ended) finish(); };
     const onError = () => { if (mine()) fail(Object.assign(new Error('The teacher audio could not be played.'), { code: 'tts_failed' })); };
     function cleanup() {
       clearInterval(cancel);
@@ -725,6 +728,7 @@ function renderListen(view) {
   $('listen-state').dataset.state = view.state;
   $('listen-state').textContent = listenStatusText(view);
   $('listen-play').disabled = view.state === 'playing' || view.state === 'loading';
+  $('listen-play').textContent = view.problem ? '↻ Retry' : '▶ Play';
   $('listen-pause').disabled = !['playing', 'gap', 'loading'].includes(view.state);
   $('listen-repeat').disabled = !lesson || view.state === 'loading';
   $('listen-next').disabled = !view.canNext || view.state === 'loading';

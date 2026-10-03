@@ -36,9 +36,10 @@ test('a lesson teaches the word: term (pinyin on screen), English + explanation 
   assert.equal(SHIDAO.mandarin, '食道');
   const l = listenLesson(SHIDAO, 385, TEACHER_SHIDAO);
   const kinds = l.steps.map((s) => s.kind);
-  assert.deepEqual(kinds, ['term', 'explain', 'sentence', 'sentence-en', 'dialogue', 'dialogue-en', 'repeat'], 'the standard teaching order');
+  assert.deepEqual(kinds, ['intro', 'term', 'explain', 'sentence', 'sentence-en', 'dialogue', 'dialogue-en', 'recap'], 'the standard teaching order');
   for (const k of REQUIRED_STEPS) assert.ok(kinds.includes(k), `has ${k}`);
   const by = Object.fromEntries(l.steps.map((s) => [s.kind, s]));
+  assert.deepEqual([by.intro.lang, by.intro.text], ['zh', '我们来学一个医学词语：食道。'], 'the teacher introduces the word in Mandarin');
   assert.deepEqual([by.term.lang, by.term.text], ['zh', '食道'], 'the voice says the characters');
   assert.match(by.term.show, /食道 {2}shí dào/, 'pinyin on screen, not spoken');
   assert.equal(by.term.rate, 0.8, 'the term slowly, for a learner');
@@ -49,21 +50,21 @@ test('a lesson teaches the word: term (pinyin on screen), English + explanation 
   assert.deepEqual([by.sentence.lang, by.sentence.text], ['zh', '医生说食道有炎症。']);
   assert.equal(by['sentence-en'].text, `That means: The doctor said there is inflammation in the esophagus. ${TEACHER_SHIDAO.context_en} Here is a short conversation.`);
   assert.equal(by.dialogue.text, '医生：你吞东西的时候食道疼吗？ 患者：有一点疼。');
-  assert.equal(by['dialogue-en'].text, 'Doctor: Does your esophagus hurt when you swallow? Patient: It hurts a little. Once more:');
-  assert.deepEqual([by.repeat.lang, by.repeat.text, by.repeat.rate], ['zh', '食道', 0.8], 'ends by saying the word again, clearly');
+  assert.equal(by['dialogue-en'].text, 'Doctor: Does your esophagus hurt when you swallow? Patient: It hurts a little.');
+  assert.deepEqual([by.recap.lang, by.recap.text], ['zh', '再听一次：食道。医生说食道有炎症。'], 'ends with the word and the sentence once more, in Mandarin');
   // The teaching layer as structured data.
   assert.deepEqual(l.teaching, {
     source: 'teacher', explanation_en: TEACHER_SHIDAO.explanation_en, usage_en: TEACHER_SHIDAO.usage_en,
     sentence_zh: TEACHER_SHIDAO.sentence_zh, sentence_en: TEACHER_SHIDAO.sentence_en, context_en: TEACHER_SHIDAO.context_en, dialogue: TEACHER_SHIDAO.dialogue,
   });
-  // Few audio segments: 7 steps, 6 distinct texts (the term at start and end is one audio).
-  assert.equal(new Set(l.steps.map((s) => s.text)).size, 6);
+  // A few natural audio segments (8 here), each made once.
+  assert.equal(new Set(l.steps.map((s) => s.text)).size, 8);
   const plain = listenLesson(SHIDAO, 385, { ...TEACHER_SHIDAO, dialogue: [] });
-  assert.deepEqual(plain.steps.map((s) => s.kind), ['term', 'explain', 'sentence', 'sentence-en', 'repeat'], 'no dialogue: 5 segments');
-  assert.match(plain.steps[3].text, /Once more:$/);
+  assert.deepEqual(plain.steps.map((s) => s.kind), ['intro', 'term', 'explain', 'sentence', 'sentence-en', 'recap'], 'no dialogue: 6 segments');
+  assert.doesNotMatch(plain.steps[4].text, /conversation/);
 });
 
-test('all 385 words: explanation, practical usage, a sentence with the exact word, translation, medical context; one language per line; 4-6 audio segments', () => {
+test('all 385 words: explanation, practical usage, a sentence with the exact word, translation, medical context; one language per line; at most 8 audio segments', () => {
   assert.equal(ENTRIES.length, 385);
   for (const e of ENTRIES) {
     const l = listenLesson(e, ENTRIES.length, templateContent(e));
@@ -74,7 +75,8 @@ test('all 385 words: explanation, practical usage, a sentence with the exact wor
     assert.match(by.explain.text, /doctors, nurses and patients/, 'practical usage');
     assert.match(by['sentence-en'].text, /^That means: .*interpreter/, 'translation and interpreter situation');
     if (e.meaning) assert.ok(by.explain.text.includes('JH Medics defines it as:'), 'template explanation quotes the source, labelled');
-    assert.ok(new Set(l.steps.map((s) => s.text)).size <= 6, `word ${e.position}: at most 6 TTS requests`);
+    assert.ok(new Set(l.steps.map((s) => s.text)).size <= 8, `word ${e.position}: at most 8 TTS requests`);
+    assert.ok(by.recap.text.includes(e.mandarin.trim()), 'the recap says the word again');
     for (const s of l.steps) {
       assert.ok(s.text.trim(), `${e.position} ${s.kind} has text`);
       if (s.lang === 'zh') {
@@ -91,8 +93,9 @@ test('all 385 words: explanation, practical usage, a sentence with the exact wor
 test('a review lesson (new study day) is the short version: word, English, sentence, translation, word again', () => {
   const l = listenLesson(SHIDAO, 385, TEACHER_SHIDAO, { review: true });
   assert.deepEqual(l.steps.map((s) => s.kind), REVIEW_STEPS);
-  assert.equal(l.steps[1].text, 'Review. Esophagus. For example:');
-  assert.equal(l.steps.at(-1).text, '食道');
+  assert.equal(l.steps[0].text, '复习一个医学词语：食道。');
+  assert.equal(l.steps[2].text, 'Review. Esophagus. For example:');
+  assert.equal(l.steps.at(-1).text, '再听一次：食道。医生说食道有炎症。');
   assert.ok(!l.steps.some((s) => s.kind === 'dialogue'), 'short');
 });
 
@@ -313,7 +316,7 @@ test('a failed audio line: the player stops on it, the word is not completed, Pl
   assert.equal(p.view.position, 1);
   assert.equal(p.view.index, 1, 'on the failed line');
   assert.equal(p.view.problem, 'audio');
-  assert.match(listenStatusText(p.view), /^Word 1: this line's audio could not be played, so Word 1 is not complete\. ▶ Play tries again/);
+  assert.match(listenStatusText(p.view), /^Audio failed\. Word 1 is not complete\. ↻ Retry plays it again/);
   assert.deepEqual(completed, [], 'not completed');
   assert.deepEqual(errors, ['tts_failed'], 'the error is reported');
   await settle();
@@ -333,7 +336,7 @@ test('a failed audio line: the player stops on it, the word is not completed, Pl
   assert.equal(silent.view.index, 0);
 });
 
-test('each line is played with only the NEXT line as look-ahead (never the whole lesson or the next word)', async () => {
+test('look-ahead is one clip: the next line, and on a word\'s last line the next word\'s first line (never a whole lesson)', async () => {
   const calls = [];
   const p = new ListenController({
     playStep: async (step, { next }) => { calls.push([step.text, next?.text ?? null]); },
@@ -341,7 +344,7 @@ test('each line is played with only the NEXT line as look-ahead (never the whole
     wait: () => Promise.resolve(),
   });
   await p.open(undefined);
-  assert.deepEqual(calls, [['w1-1', 'w1-2'], ['w1-2', null], ['w2-1', 'w2-2'], ['w2-2', null]]);
+  assert.deepEqual(calls, [['w1-1', 'w1-2'], ['w1-2', 'w2-1'], ['w2-1', 'w2-2'], ['w2-2', null]]);
 });
 
 test('Qwen voice rate-limited (429 after the server\'s retries): pauses on that line, says so, completes nothing; Play retries', async () => {
@@ -362,7 +365,7 @@ test('Qwen voice rate-limited (429 after the server\'s retries): pauses on that 
   await p.open(undefined);
   assert.equal(p.state, 'paused');
   assert.equal(p.view.problem, 'rate_limited');
-  assert.match(listenStatusText(p.view), /rate limit.*Word 1 is paused, not complete.*▶ Play to retry/);
+  assert.match(listenStatusText(p.view), /^Audio failed: .*rate limit.*Word 1 is not complete.*↻ Retry/);
   assert.deepEqual(completed, []);
   assert.deepEqual(errors, ['tts_rate_limited']);
   await settle();
@@ -448,4 +451,137 @@ test('the page wording: one shared place, never "press Next"; which word plays v
   for (const state of ['loading', 'playing', 'gap', 'paused', 'finished']) {
     assert.doesNotMatch(listenStatusText({ ...view, state }), /Finished this word|→ Next for the next word/);
   }
+});
+
+// ---------- regression: the player must never stop after a word ----------
+
+// Audio driven clip by clip: each clip plays until the test "ends" it (its
+// real 'ended' event). Ending an old clip again simulates a duplicate or stale
+// 'ended' callback.
+function clipAudio() {
+  const clips = [];
+  return {
+    clips,
+    played: () => clips.map((c) => c.text),
+    playStep: (step) => new Promise((resolve) => { clips.push({ text: step.text, end: resolve }); }),
+    stopAudio: () => {},
+    last: () => clips.at(-1),
+  };
+}
+const threeClipLessons = (total = 5) => (target) => {
+  const position = target?.position ?? 1;
+  return Promise.resolve({ position, review: false, total, next: position < total ? { position: position + 1, review: false } : null, steps: [1, 2, 3].map((i) => ({ kind: `k${i}`, text: `w${position}-${i}` })) });
+};
+
+test('REGRESSION: Word 1\'s final clip ends → Word 1 completed → Word 2 loaded and started automatically (no Next, no Play)', async () => {
+  const audio = clipAudio();
+  const completed = [];
+  const loaded = [];
+  const p = new ListenController({
+    ...audio,
+    loadLesson: async (t) => { const l = await threeClipLessons()(t); loaded.push(l.position); return l; },
+    onComplete: (l) => completed.push(l.position),
+    wait: () => Promise.resolve(),
+  });
+  p.open(undefined); // the one click on Listen & Learn
+  await settle();
+  assert.deepEqual(audio.played(), ['w1-1']);
+  audio.last().end(); await settle(); // clip 1 ended → clip 2
+  audio.last().end(); await settle(); // clip 2 ended → clip 3
+  assert.deepEqual(audio.played(), ['w1-1', 'w1-2', 'w1-3']);
+  assert.deepEqual(completed, [], 'not complete before the FINAL clip ends');
+  audio.last().end(); await settle(); // the final clip ended
+  assert.deepEqual(completed, [1], 'Word 1 completed on the final ended');
+  assert.ok(loaded.includes(2), 'Word 2 lesson loaded');
+  assert.equal(p.view.position, 2);
+  assert.equal(p.state, 'playing');
+  assert.deepEqual(audio.played(), ['w1-1', 'w1-2', 'w1-3', 'w2-1'], 'Word 2 audio started by itself');
+  // ... and on to Word 3 the same way.
+  for (let i = 0; i < 3; i++) { audio.last().end(); await settle(); }
+  assert.deepEqual(completed, [1, 2]);
+  assert.equal(p.view.position, 3);
+  assert.equal(audio.last().text, 'w3-1');
+});
+
+test('REGRESSION: a duplicate ended for Word 1\'s final clip completes Word 1 once and starts Word 2 once', async () => {
+  const audio = clipAudio();
+  const completed = [];
+  const p = new ListenController({ ...audio, loadLesson: threeClipLessons(), onComplete: (l) => completed.push(l.position), wait: () => Promise.resolve() });
+  p.open(undefined);
+  await settle();
+  for (let i = 0; i < 2; i++) { audio.last().end(); await settle(); }
+  const final = audio.last();
+  final.end(); final.end(); // fired twice
+  await settle();
+  final.end();
+  await settle();
+  assert.deepEqual(completed, [1], 'completed once');
+  assert.equal(audio.played().filter((t) => t === 'w2-1').length, 1, 'Word 2 started once');
+  assert.deepEqual(audio.played().slice(3), ['w2-1'], 'Word 2 is still on its first clip (nothing skipped)');
+});
+
+test('REGRESSION: a stale ended from Word 1 arriving after Next (Word 2 playing) is ignored: Word 2 is not skipped, Word 1 not completed', async () => {
+  const audio = clipAudio();
+  const completed = [];
+  const p = new ListenController({ ...audio, loadLesson: threeClipLessons(), onComplete: (l) => completed.push(l.position), wait: () => Promise.resolve() });
+  p.open(undefined);
+  await settle();
+  const old = audio.last(); // w1-1 still playing
+  p.next();
+  await settle();
+  assert.equal(audio.last().text, 'w2-1');
+  old.end(); // the old clip's ended arrives late
+  await settle();
+  assert.equal(p.view.position, 2);
+  assert.equal(p.view.index, 0, 'still on Word 2\'s first clip');
+  assert.deepEqual(audio.played(), ['w1-1', 'w2-1'], 'nothing extra played');
+  assert.deepEqual(completed, [], 'the skipped Word 1 is not completed');
+  for (let i = 0; i < 3; i++) { audio.last().end(); await settle(); }
+  assert.deepEqual(completed, [2], 'Word 2 completes normally');
+});
+
+test('REGRESSION: Repeat restarts the word; a late ended from before the Repeat is ignored; after the replay it continues to Word 2 by itself', async () => {
+  const audio = clipAudio();
+  const completed = [];
+  const p = new ListenController({ ...audio, loadLesson: threeClipLessons(), onComplete: (l) => completed.push(l.position), wait: () => Promise.resolve() });
+  p.open(undefined);
+  await settle();
+  audio.last().end(); await settle();
+  const before = audio.last(); // w1-2 playing
+  p.repeat();
+  await settle();
+  assert.equal(audio.last().text, 'w1-1', 'from the beginning');
+  before.end(); await settle(); // stale
+  assert.equal(p.view.index, 0);
+  assert.deepEqual(completed, []);
+  for (let i = 0; i < 3; i++) { audio.last().end(); await settle(); }
+  assert.deepEqual(completed, [1], 'completed once, after the replay');
+  assert.equal(audio.last().text, 'w2-1', 'then Word 2 automatically');
+});
+
+test('REGRESSION: Pause mid-word does not advance; Resume replays the interrupted clip and continues; Exit mid-word completes nothing', async () => {
+  const audio = clipAudio();
+  const completed = [];
+  const p = new ListenController({ ...audio, loadLesson: threeClipLessons(), onComplete: (l) => completed.push(l.position), wait: () => Promise.resolve() });
+  p.open(undefined);
+  await settle();
+  audio.last().end(); await settle();
+  const interrupted = audio.last(); // w1-2
+  p.pause();
+  interrupted.end(); // the audio layer ends the stopped clip: must not count
+  await settle();
+  assert.equal(p.state, 'paused');
+  assert.deepEqual([p.view.position, p.view.index], [1, 1]);
+  p.play();
+  await settle();
+  assert.equal(audio.last().text, 'w1-2', 'resumes the same clip');
+  audio.last().end(); await settle();
+  audio.last().end(); await settle();
+  assert.deepEqual(completed, [1]);
+  assert.equal(p.view.position, 2);
+  const mid = audio.last();
+  p.exit();
+  mid.end(); await settle();
+  assert.equal(p.state, 'idle');
+  assert.deepEqual(completed, [1], 'Word 2 was not completed by Exit or a late ended');
 });

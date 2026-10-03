@@ -240,11 +240,12 @@ Tap **🎧 Listen & Learn**, put the phone down, and listen. Nothing is asked an
 the microphone is never used. The teacher teaches each word, then goes on to the
 next word by itself, like a personal medical-Chinese podcast. For every word:
 
-1. **the term**, slowly (`硬膜外`), with the **pinyin on screen** (`yìng mó wài`).
+1. **a Mandarin introduction**: "我们来学一个医学词语：硬膜外。";
+2. **the term**, slowly (`硬膜外`), with the **pinyin on screen** (`yìng mó wài`).
    Pinyin is never sent to the voice: the Mandarin voice says the characters;
-2. **the English and a short explanation**: what the term means in medical
-   communication, built on the JH Medics meaning;
-3. **practical usage**: where and how the term is actually used (which
+3. **the English and a short explanation**: what the term means in medical
+   communication, built on the JH Medics meaning, then **practical usage**:
+   where and how the term is actually used (which
    situations, departments, conversations);
 4. **an example sentence** in Mandarin that uses the **exact** term
    (`医生说我们需要打硬膜外。`);
@@ -252,14 +253,14 @@ next word by itself, like a personal medical-Chinese podcast. For every word:
    hears or needs the term;
 6. when it helps, **a short doctor/patient/nurse/interpreter exchange**, in
    Mandarin, then in English;
-7. **the term once more**, slowly.
+7. **a Mandarin recap**: "再听一次：硬膜外。<the example sentence>".
 
-This is 5 to 7 natural audio segments per word, so a word costs only 4 to 6 Qwen
-TTS requests (the term at the start and the end is the same audio).
+This is 6 to 8 natural audio segments per word, each generated once (6 to 8
+Qwen TTS requests the first time; cached afterwards).
 
 - **Where the content comes from:** the term, pinyin, English, meaning and order
   come from JH Medics Volume 1 and are never changed. JH Medics has no
-  explanations or example sentences, so the Qwen teacher writes items 2-6 (the
+  explanations or example sentences, so the Qwen teacher writes items 3-7 (the
   explanation, usage, sentence, translation, situation and dialogue), once per
   word, server-side, from that entry only (`src/listencontent.js`). The page
   labels them "Explanation and examples by the AI teacher", never as JH Medics.
@@ -299,9 +300,21 @@ complete. ▶ Play tries again · → Next skips it." ▶ Play asks Qwen for tha
 again and carries on. If a finished word cannot be saved, the player also stops
 and ▶ Play saves it.
 
-The page shows its version at the bottom (for example `v1.0.5`). If the page and
-the server differ, a notice says so. Stop the server, `git pull`,
-`npm install`, start it again and reload the page.
+A clip only counts as finished when the audio element has really played to its
+end (`ended` while the element holds that clip). Duplicate, stray or late
+`ended` events, and anything from a clip that Pause, Repeat, Next or Exit
+cancelled, are ignored, so nothing can skip a clip or a word.
+
+The page shows its version at the bottom (for example `v1.0.6`). If the page and
+the server differ, a notice says so.
+
+**Updating (Windows):** double-click **`update-tutor.cmd`** in `roy-tutor`. It
+puts aside local changes git would otherwise refuse (usually `package-lock.json`
+after `npm install`), switches to the latest version, runs `npm install` and
+prints the version. `.env` and `tutor.db` (your progress) are not touched. Then
+close any old tutor window and double-click `start-tutor.cmd`. If an old server
+is still running, the new one says "Port 3443 is already in use: another Roy
+tutor server (probably an older version) is still running" instead of starting.
 
 On a new study day, Listen & Learn first plays short reviews of the previous
 day's words (word, pinyin, English, sentence, translation, word), once per day,
