@@ -434,11 +434,11 @@ export function listenStatusText(view) {
   const here = view.position ? `${view.review ? 'Review of ' : ''}Word ${view.position}` : '';
   switch (view.state) {
     case 'loading': return view.loadingTarget ? `Preparing ${wordName(view.loadingTarget)} (the teacher's lesson and voice)…` : 'Preparing the lesson…';
-    case 'playing': return `Playing ${here} · ${view.index + 1} of ${view.steps}`;
-    case 'gap': return `${here} complete. Moving to ${wordName(view.next)}…`;
+    case 'playing': return `Playing ${here}${view.review || !view.total ? '' : ` of ${view.total}`} · part ${view.index + 1} of ${view.steps}`;
+    case 'gap': return `${here} complete. Now let's learn ${wordName(view.next)}…`;
     case 'paused':
-      if (view.problem === 'audio') return `Audio failed. ${here} is not complete. ↻ Retry plays it again · → Next skips it.`;
-      if (view.problem === 'rate_limited') return `Audio failed: Qwen's voice is busy right now (rate limit). ${here} is not complete. Wait a moment, then ↻ Retry.`;
+      if (view.problem === 'audio') return `Audio temporarily unavailable. ${here} is not complete. ↻ Retry plays it again · → Next skips it.`;
+      if (view.problem === 'rate_limited') return `Audio temporarily unavailable: Qwen's voice is busy (rate limit). ${here} is not complete. Wait a moment, then ↻ Retry.`;
       if (view.problem === 'not_saved') return `${here} was heard in full but could not be saved. ↻ Retry saves it.`;
       return here ? `Paused at ${here}. ▶ Play to continue.` : 'Paused. ▶ Play to continue.';
     case 'finished': return `${here} complete. That was the last word of JH Medics Volume 1.`;
@@ -454,9 +454,9 @@ export function listenWhereText(lesson, place, listened = 0) {
   const word = `Word ${lesson.position} of ${lesson.total}`;
   if (!place || place === lesson.position) return `Now teaching: ${word}${heard}`;
   if (lesson.position > place) return `Now playing: ${word}, ahead of your place · your place stays at Word ${place} (skipped, not completed yet)${heard}`;
-  return `Now playing: ${word} (already completed) · your place: Word ${place}${heard}`;
+  return `${word} complete · your place is now Word ${place}${heard}`;
 }
 
 // Version of the page code; the server reports its own (package.json). A
 // difference means an old page or an old server process: reload / restart.
-export const CLIENT_VERSION = '1.0.6';
+export const CLIENT_VERSION = '1.0.7';

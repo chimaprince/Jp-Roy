@@ -625,6 +625,7 @@ async function showHome() {
     const s = await api('GET', '/api/status');
     renderStatus(s);
     $('version').textContent = `v${CLIENT_VERSION}`;
+    $('build').textContent = `Version ${CLIENT_VERSION}${s.commit ? ` (commit ${s.commit})` : ''}`;
     if (s.version && s.version !== CLIENT_VERSION) {
       notice(`This page (v${CLIENT_VERSION}) and the server (v${s.version}) are different versions. Stop the server, run "git pull" and "npm install", start it again, then reload this page.`);
       return;
@@ -745,5 +746,6 @@ $('listen-exit').addEventListener('click', () => {
   showHome(); // back to Roy's own place
 });
 
+$('build').textContent = `Version ${CLIENT_VERSION}`; // the page's own version, before the server answers
 showMode(null);
 showHome();

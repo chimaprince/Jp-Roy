@@ -305,8 +305,10 @@ end (`ended` while the element holds that clip). Duplicate, stray or late
 `ended` events, and anything from a clip that Pause, Repeat, Next or Exit
 cancelled, are ignored, so nothing can skip a clip or a word.
 
-The page shows its version at the bottom (for example `v1.0.6`). If the page and
-the server differ, a notice says so.
+The page shows its version under the title ("Version 1.0.7 (commit 1a2b3c4)")
+and at the bottom. `https://localhost:3443/api/version` returns the same version
+and commit, and the server prints them at startup together with the folder it
+serves the page from. If the page and the server differ, a notice says so.
 
 **Updating (Windows):** double-click **`update-tutor.cmd`** in `roy-tutor`. It
 puts aside local changes git would otherwise refuse (usually `package-lock.json`

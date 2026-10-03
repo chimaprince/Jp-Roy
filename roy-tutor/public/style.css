@@ -134,3 +134,5 @@ h1 { margin: 0; font-size: 1.5rem; letter-spacing: 0.06em; }
 .listen-now { white-space: pre-line; }
 .listen-source { color: var(--muted); font-size: 0.8rem; min-height: 1.2em; margin: -4px 0 8px; }
 .version { text-align: center; color: var(--muted); font-size: 0.75rem; margin-top: 24px; }
+
+.build { margin: 0.1rem 0 0.4rem; font-size: 0.8rem; letter-spacing: 0.04em; opacity: 0.75; }

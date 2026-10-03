@@ -391,7 +391,7 @@ export class SpeechStore {
         if (job.waiters === 0 && !job.started) {
           // Nobody wants it and it was not sent yet: drop it unsent.
           this.queue = this.queue.filter((j) => j !== job);
-          this.inflight.delete(key);
+          if (this.inflight.get(key) === job) this.inflight.delete(key);
           this.stats.dropped += 1;
         }
       };
@@ -411,17 +411,16 @@ export class SpeechStore {
     try {
       while (this.queue.length) {
         const job = this.queue.shift();
-        job.started = true;
         try {
-          const out = await this.#synthesize(job.text);
+          const out = await this.#synthesize(job);
           const audio = { audio: out.audio, mime: out.mime };
           this.#remember(job.key, audio);
           job.resolve(audio);
         } catch (err) {
-          this.log(`[voice] TTS failed: ${err.message}${err.detail ? ` ${err.detail}` : ''}`);
+          if (err.code !== 'tts_cancelled') this.log(`[voice] TTS failed: ${err.message}${err.detail ? ` ${err.detail}` : ''}`);
           job.reject(err); // not cached: asking again tries Qwen again
         } finally {
-          this.inflight.delete(job.key);
+          if (this.inflight.get(job.key) === job) this.inflight.delete(job.key);
         }
       }
     } finally {
@@ -430,10 +429,18 @@ export class SpeechStore {
   }
 
   // One Qwen request (after the minimum gap), with a few spaced retries on 429.
-  async #synthesize(text) {
+  // Right before each request: if nobody wants the line any more (the page
+  // paused, skipped or left while it waited), nothing is sent.
+  async #synthesize(job) {
+    const { text } = job;
     for (let attempt = 0; ; attempt += 1) {
       const wait = this.lastSent + this.minGapMs - Date.now();
       if (wait > 0) await sleep(wait);
+      if (job.waiters === 0) {
+        this.stats.dropped += 1;
+        throw new VoiceError('tts_cancelled', 'No longer needed.', { status: 499 });
+      }
+      job.started = true;
       this.lastSent = Date.now();
       this.stats.requests += 1;
       try {

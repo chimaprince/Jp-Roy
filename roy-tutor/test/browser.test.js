@@ -153,18 +153,21 @@ test('browser: Listen & Learn plays Word 1 → Word 2 → Word 3 by itself (no N
       await p.waitFor('the page shows Word 1', (e) => e.kind === 'progress' && /Progress: Word 1 of 385/.test(e.text));
       await p.waitFor('the Word 1 card', (e) => e.kind === 'card' && /\b1\b/.test(e.text));
       assert.equal(await p.page.textContent('#version'), `v${pkg.version}`);
+      const running = await (await fetch(`${s.url}/api/version`)).json();
+      await p.page.waitForFunction((v) => document.getElementById('build').textContent === `Version ${v.version} (commit ${v.commit})`, running);
+      assert.equal(running.version, pkg.version, 'the header shows exactly the version /api/version reports');
 
       // 2. Listen mode starts (the only click).
       await p.page.click('#mode-listen');
       assert.equal(await p.page.isVisible('#listen'), true);
 
       // 3. Word 1 plays, its audio really ends, and it is completed.
-      const w1 = await p.waitFor('Word 1 playing', state(/^Playing Word 1 · 1 of \d+$/));
+      const w1 = await p.waitFor('Word 1 playing', state(/^Playing Word 1 of 385 · part 1 of \d+$/));
       const audioEnded = await p.waitFor('a real audio "ended" event in Word 1', (e) => e.kind === 'audio' && e.text === 'ended' && e.t > w1.t);
       assert.ok(audioEnded);
-      const gap1 = await p.waitFor('Word 1 completed', state(/^Word 1 complete\. Moving to Word 2…$/));
+      const gap1 = await p.waitFor('Word 1 completed', state(/^Word 1 complete\. Now let's learn Word 2…$/));
       const tl = await p.timeline();
-      const lastW1Step = tl.filter((e) => e.kind === 'state' && /^Playing Word 1 · /.test(e.text)).at(-1).text;
+      const lastW1Step = tl.filter((e) => e.kind === 'state' && /^Playing Word 1 of 385 · part /.test(e.text)).at(-1).text;
       const [, n, of] = lastW1Step.match(/(\d+) of (\d+)$/);
       assert.equal(n, of, 'every step of Word 1 played before it was completed');
       const endedInW1 = tl.filter((e) => e.kind === 'audio' && e.text === 'ended' && e.t > w1.t && e.t <= gap1.t).length;
@@ -172,17 +175,17 @@ test('browser: Listen & Learn plays Word 1 → Word 2 → Word 3 by itself (no N
       assert.deepEqual(p.completes()[0], { position: 1, review: false });
 
       // 4. Word 2 appears without clicking Next, after a short pause.
-      const w2 = await p.waitFor('Word 2 playing (no click)', state(/^Playing Word 2 · 1 of \d+$/));
+      const w2 = await p.waitFor('Word 2 playing (no click)', state(/^Playing Word 2 of 385 · part 1 of \d+$/));
       assert.ok(w2.t - gap1.t >= 1000, `a short pause between words (${w2.t - gap1.t} ms)`);
       await p.waitFor('the Word 2 card', (e) => e.kind === 'where' && /^Now teaching: Word 2 of 385/.test(e.text));
 
       // 5. Word 2 plays to the end and is completed.
-      const gap2 = await p.waitFor('Word 2 completed', state(/^Word 2 complete\. Moving to Word 3…$/));
+      const gap2 = await p.waitFor('Word 2 completed', state(/^Word 2 complete\. Now let's learn Word 3…$/));
       assert.ok(gap2.t > w2.t);
       assert.deepEqual(p.completes()[1], { position: 2, review: false });
 
       // 6. Word 3 appears without clicking Next.
-      await p.waitFor('Word 3 playing (no click)', state(/^Playing Word 3 · 1 of \d+$/));
+      await p.waitFor('Word 3 playing (no click)', state(/^Playing Word 3 of 385 · part 1 of \d+$/));
       await p.page.click('#listen-pause');
 
       // 7. The progress / current place follows, in the page and on the server.
@@ -232,7 +235,7 @@ test('browser: Pause does not advance or request audio; Play resumes the same li
     const p = await openPage(s.url);
     try {
       await p.page.click('#mode-listen');
-      const step3 = await p.waitFor('Word 1 step 3', state(/^Playing Word 1 · 3 of \d+$/));
+      const step3 = await p.waitFor('Word 1 step 3', state(/^Playing Word 1 of 385 · part 3 of \d+$/));
       await p.waitFor('its audio playing', (e) => e.kind === 'audio' && e.text === 'playing' && e.t > step3.t);
       await p.page.click('#listen-pause');
       await p.waitFor('paused', state(/^Paused at Word 1\./));
@@ -248,12 +251,12 @@ test('browser: Pause does not advance or request audio; Play resumes the same li
 
       const resume = Date.now();
       await p.page.click('#listen-play');
-      const resumed = await p.waitFor('Word 1 resumed at step 3', (e) => e.kind === 'state' && e.text.startsWith('Playing Word 1 · 3 of') && e.t > step3.t + 100);
+      const resumed = await p.waitFor('Word 1 resumed at step 3', (e) => e.kind === 'state' && e.text.startsWith('Playing Word 1 of 385 · part 3 of') && e.t > step3.t + 100);
       await p.waitFor('its audio plays again', (e) => e.kind === 'audio' && e.text === 'playing' && e.t > resumed.t);
       assert.equal(speechRequests(p).length, downloadsAtPause, 'the interrupted line replays from the audio the page already had');
       assert.equal(q.seen.tts, qwenAtPause, 'and Qwen is not asked again');
       assert.ok(Date.now() - resume < 5000);
-      await p.waitFor('then Word 2 by itself', state(/^Playing Word 2 · 1 of/));
+      await p.waitFor('then Word 2 by itself', state(/^Playing Word 2 of 385 · part 1 of/));
       await p.page.click('#listen-pause');
       assert.deepEqual(p.completes(), [{ position: 1, review: false }]);
       assert.equal(await place(s.url), 2);
@@ -269,23 +272,23 @@ test('browser: Repeat replays the current word from cached audio and does not ad
     const p = await openPage(s.url);
     try {
       await p.page.click('#mode-listen');
-      const mid = await p.waitFor('Word 1 step 4', state(/^Playing Word 1 · 4 of \d+$/));
+      const mid = await p.waitFor('Word 1 step 4', state(/^Playing Word 1 of 385 · part 4 of \d+$/));
       await p.waitFor('its audio playing', (e) => e.kind === 'audio' && e.text === 'playing' && e.t > mid.t);
       const heard = speechRequests(p);
       const qwenBefore = q.seen.tts;
       await p.page.click('#listen-repeat');
-      const again = await p.waitFor('Word 1 from its first step again', (e) => e.kind === 'state' && /^Playing Word 1 · 1 of/.test(e.text) && e.t > mid.t);
+      const again = await p.waitFor('Word 1 from its first step again', (e) => e.kind === 'state' && /^Playing Word 1 of 385 · part 1 of/.test(e.text) && e.t > mid.t);
       assert.equal(p.completes().length, 0, 'Repeat did not complete Word 1');
       assert.equal(await place(s.url), 1, 'Repeat did not move the place');
       const between = (await p.timeline()).filter((e) => e.kind === 'state' && e.t > mid.t && e.t <= again.t).map((e) => e.text);
       assert.ok(!between.some((t) => /Word 2/.test(t)), `no Word 2 before the replay: ${between}`);
-      const replayed = await p.waitFor('the replay reaches step 4 again', (e) => e.kind === 'state' && e.t > again.t && e.text.startsWith('Playing Word 1 · 4 of'));
+      const replayed = await p.waitFor('the replay reaches step 4 again', (e) => e.kind === 'state' && e.t > again.t && e.text.startsWith('Playing Word 1 of 385 · part 4 of'));
       await p.waitFor('its audio playing', (e) => e.kind === 'audio' && e.text === 'playing' && e.t > replayed.t);
       assert.deepEqual(speechRequests(p).slice(0, heard.length), heard);
       assert.equal(speechRequests(p).filter((u) => heard.includes(u)).length, heard.length, 'lines 1-4 were not downloaded again');
       assert.ok(q.seen.tts <= qwenBefore + 1, 'and not generated again (at most the next new line was asked for)');
       // After the replay finishes, it goes on as usual.
-      await p.waitFor('then Word 2', state(/^Playing Word 2 · 1 of/));
+      await p.waitFor('then Word 2', state(/^Playing Word 2 of 385 · part 1 of/));
       await p.page.click('#listen-pause');
       assert.deepEqual(p.completes(), [{ position: 1, review: false }]);
       assert.equal(new Set(q.seen.ttsText).size, q.seen.ttsText.length, 'no line generated twice');
@@ -304,22 +307,22 @@ test('browser: Next skips at once; Word 1 audio still being generated never play
       await p.page.evaluate(() => {
         const el = document.getElementById('listen-state');
         const obs = new MutationObserver(() => {
-          if (/^Playing Word 1 · 3 of/.test(el.textContent)) { obs.disconnect(); window.nextAt = performance.now(); document.getElementById('listen-next').click(); }
+          if (/^Playing Word 1 of 385 · part 3 of/.test(el.textContent)) { obs.disconnect(); window.nextAt = performance.now(); document.getElementById('listen-next').click(); }
         });
         obs.observe(el, { childList: true, characterData: true, subtree: true });
       });
       await p.page.click('#mode-listen');
-      const line = await p.waitFor('Word 1 step 3', state(/^Playing Word 1 · 3 of \d+$/));
+      const line = await p.waitFor('Word 1 step 3', state(/^Playing Word 1 of 385 · part 3 of \d+$/));
       const click = (await p.waitFor('the Next click', (e) => e.kind === 'click' && e.text === 'listen-next')).t;
       assert.ok(click - line.t < 50, 'Next was pressed as the line started');
       assert.ok(!(await p.timeline()).some((e) => e.kind === 'clip' && e.t >= line.t && e.t <= click), 'its audio had not started yet');
-      await p.waitFor('Word 2 after Next', (e) => e.kind === 'state' && e.t > click && /^Playing Word 2 · 1 of/.test(e.text));
+      await p.waitFor('Word 2 after Next', (e) => e.kind === 'state' && e.t > click && /^Playing Word 2 of 385 · part 1 of/.test(e.text));
       const w2Audio = await p.waitFor('Word 2 audio playing', (e) => e.kind === 'clip' && e.t > click);
       await p.page.waitForTimeout(1200); // the stale Word 1 audio has certainly arrived by now
       await p.page.click('#listen-pause');
       const clips = (await p.timeline()).filter((e) => e.kind === 'clip' && e.t > click);
       assert.ok(clips.every((c) => /Word 2/.test(c.text)), `only Word 2 audio played after Next: ${clips.map((c) => c.text).join(' | ')}`);
-      assert.match(w2Audio.text, /^Playing Word 2 · 1 of/);
+      assert.match(w2Audio.text, /^Playing Word 2 of 385 · part 1 of/);
       assert.equal(p.completes().length, 0, 'the skipped Word 1 was not completed');
       assert.equal(await place(s.url), 1, 'the place stays at the skipped word');
       assert.match(await p.page.textContent('#listen-where'), /^Now playing: Word 2 of 385, ahead of your place · your place stays at Word 1 \(skipped, not completed yet\)/, 'the page says clearly which word plays and where the place is');
@@ -340,7 +343,7 @@ test('browser: Qwen TTS 429 (rate limit): the server backs off and retries one a
     const p = await openPage(s.url);
     try {
       await p.page.click('#mode-listen');
-      const stopped = await p.waitFor('the rate-limit pause', state(/^Audio failed: Qwen's voice is busy right now \(rate limit\)\. Word 1 is not complete\. Wait a moment, then ↻ Retry\.$/));
+      const stopped = await p.waitFor('the rate-limit pause', state(/^Audio temporarily unavailable: Qwen's voice is busy \(rate limit\)\. Word 1 is not complete\. Wait a moment, then ↻ Retry\.$/));
       assert.match(await p.page.textContent('#notice'), /temporarily rate-limited/);
       const tries = q.seen.ttsText.filter(isTarget).length;
       assert.equal(tries, 4, 'the first request plus 3 spaced retries, then it stopped');
@@ -353,8 +356,8 @@ test('browser: Qwen TTS 429 (rate limit): the server backs off and retries one a
 
       limited = false; // the rate limit has cleared
       await p.page.click('#listen-play');
-      await p.waitFor('Word 1 completed after the retry', state(/^Word 1 complete\. Moving to Word 2…$/));
-      await p.waitFor('then Word 2 by itself', state(/^Playing Word 2 · 1 of/));
+      await p.waitFor('Word 1 completed after the retry', state(/^Word 1 complete\. Now let's learn Word 2…$/));
+      await p.waitFor('then Word 2 by itself', state(/^Playing Word 2 of 385 · part 1 of/));
       await p.page.click('#listen-pause');
       assert.equal(q.seen.ttsText.filter(isTarget).length, 5, 'one more request for that line after Play');
       assert.deepEqual(p.completes(), [{ position: 1, review: false }]);
@@ -373,7 +376,7 @@ test('browser: an audio failure stops on that line with a clear error, does not 
     const p = await openPage(s.url, { route });
     try {
       await p.page.click('#mode-listen');
-      const stopped = await p.waitFor('the failed line stops the player', state(/^Audio failed\. Word 1 is not complete\. ↻ Retry plays it again · → Next skips it\.$/));
+      const stopped = await p.waitFor('the failed line stops the player', state(/^Audio temporarily unavailable\. Word 1 is not complete\. ↻ Retry plays it again · → Next skips it\.$/));
       assert.match(await p.page.textContent('#notice'), /voice \(Qwen\) is not available/, 'a clear error is shown');
       assert.equal(await p.page.textContent('#listen-play'), '↻ Retry', 'the Play button offers Retry');
       await p.page.waitForTimeout(2500); // longer than the rest of the word would take
@@ -384,10 +387,10 @@ test('browser: an audio failure stops on that line with a clear error, does not 
       assert.match(await p.page.textContent('#progress'), /Word 1 of 385/);
 
       await p.page.click('#listen-play'); // retry
-      const retried = await p.waitFor('the failed line again', (e) => e.kind === 'state' && e.t > stopped.t && /^Playing Word 1 · 2 of/.test(e.text));
+      const retried = await p.waitFor('the failed line again', (e) => e.kind === 'state' && e.t > stopped.t && /^Playing Word 1 of 385 · part 2 of/.test(e.text));
       await p.waitFor('its audio really plays this time', (e) => e.kind === 'audio' && e.text === 'ended' && e.t > retried.t);
-      await p.waitFor('Word 1 completed after the retry', state(/^Word 1 complete\. Moving to Word 2…$/));
-      await p.waitFor('then Word 2 by itself', state(/^Playing Word 2 · 1 of/));
+      await p.waitFor('Word 1 completed after the retry', state(/^Word 1 complete\. Now let's learn Word 2…$/));
+      await p.waitFor('then Word 2 by itself', state(/^Playing Word 2 of 385 · part 1 of/));
       await p.page.click('#listen-pause');
       assert.deepEqual(p.completes(), [{ position: 1, review: false }]);
       assert.equal(await place(s.url), 2);
@@ -402,7 +405,7 @@ test('browser: Exit mid-word completes nothing; reload keeps the place: after Wo
     const p = await openPage(s.url);
     try {
       await p.page.click('#mode-listen');
-      await p.waitFor('Word 3 playing (no click)', state(/^Playing Word 3 · 2 of/));
+      await p.waitFor('Word 3 playing (no click)', state(/^Playing Word 3 of 385 · part 2 of/));
       await p.page.click('#listen-exit'); // leave in the middle of Word 3
       assert.deepEqual(p.completes().map((c) => c.position), [1, 2], 'Words 1 and 2 saved as completed; Word 3 (left mid-way) not');
       await p.waitFor('home shows Word 3', (e) => e.kind === 'progress' && e.text === 'Progress: Word 3 of 385');
@@ -413,7 +416,7 @@ test('browser: Exit mid-word completes nothing; reload keeps the place: after Wo
     try {
       await again.waitFor('the reloaded page shows Word 3', (e) => e.kind === 'progress' && e.text === 'Progress: Word 3 of 385');
       await again.page.click('#mode-listen');
-      await again.waitFor('Listen & Learn continues at Word 3', state(/^Playing Word 3 · 1 of/));
+      await again.waitFor('Listen & Learn continues at Word 3', state(/^Playing Word 3 of 385 · part 1 of/));
       assert.match(await again.page.textContent('#listen-where'), /^Now teaching: Word 3 of 385/);
       await again.page.click('#listen-pause');
       assert.equal(await place(s.url), 3);
@@ -428,19 +431,19 @@ test('browser: stray, duplicate or stale "ended" events cannot skip a clip or a 
     const p = await openPage(s.url);
     try {
       await p.page.click('#mode-listen');
-      const line2 = await p.waitFor('Word 1 clip 2', state(/^Playing Word 1 · 2 of \d+$/));
+      const line2 = await p.waitFor('Word 1 clip 2', state(/^Playing Word 1 of 385 · part 2 of \d+$/));
       await p.waitFor('its audio playing', (e) => e.kind === 'audio' && e.text === 'playing' && e.t > line2.t);
       // Three fake "ended" events while the 1-second clip is still playing.
       await p.page.evaluate(() => { for (let i = 0; i < 3; i++) window.player.dispatchEvent(new Event('ended')); });
       await p.page.waitForTimeout(300);
       const last = (await p.timeline()).filter((e) => e.kind === 'state').at(-1).text;
-      assert.match(last, /^Playing Word 1 · 2 of/, 'still on clip 2');
+      assert.match(last, /^Playing Word 1 of 385 · part 2 of/, 'still on clip 2');
       // Let it play on; every clip of Word 1 plays, in order, then Word 2 once.
-      await p.waitFor('Word 2 by itself', state(/^Playing Word 2 · 1 of/));
+      await p.waitFor('Word 2 by itself', state(/^Playing Word 2 of 385 · part 1 of/));
       await p.page.click('#listen-pause');
-      const w1 = (await p.texts('state')).filter((t) => /^Playing Word 1 · /.test(t)).map((t) => Number(t.match(/· (\d+) of/)[1]));
+      const w1 = (await p.texts('state')).filter((t) => /^Playing Word 1 of 385 · part /.test(t)).map((t) => Number(t.match(/part (\d+) of/)[1]));
       assert.deepEqual(w1, Array.from({ length: w1.length }, (_, i) => i + 1), `no clip skipped: ${w1}`);
-      assert.equal((await p.texts('state')).filter((t) => /^Playing Word 2 · 1 of/.test(t)).length, 1, 'Word 2 started once');
+      assert.equal((await p.texts('state')).filter((t) => /^Playing Word 2 of 385 · part 1 of/.test(t)).length, 1, 'Word 2 started once');
       assert.deepEqual(p.completes(), [{ position: 1, review: false }], 'Word 1 completed once');
     } finally {
       await p.page.close();
@@ -458,13 +461,13 @@ test('browser: full sequence: auto-advance 1→2→3, Pause, Resume, Repeat, fin
       await p.waitFor('home shows Word 1', (e) => e.kind === 'progress' && e.text === 'Progress: Word 1 of 385');
       // 3-5. Listen & Learn; Word 1 audio plays and really finishes.
       await p.page.click('#mode-listen');
-      const w1 = await p.waitFor('Word 1 playing', state(/^Playing Word 1 · 1 of/));
+      const w1 = await p.waitFor('Word 1 playing', state(/^Playing Word 1 of 385 · part 1 of/));
       await p.waitFor('Word 1 audio playing', (e) => e.kind === 'audio' && e.text === 'playing' && e.t > w1.t);
-      await p.waitFor('Word 1 finished', state(/^Word 1 complete\. Moving to Word 2…$/));
+      await p.waitFor('Word 1 finished', state(/^Word 1 complete\. Now let's learn Word 2…$/));
       // 6-8. Word 2 and Word 3 by themselves.
-      const w2 = await p.waitFor('Word 2 playing', state(/^Playing Word 2 · 1 of/));
+      const w2 = await p.waitFor('Word 2 playing', state(/^Playing Word 2 of 385 · part 1 of/));
       await p.waitFor('Word 2 audio playing', (e) => e.kind === 'audio' && e.text === 'playing' && e.t > w2.t);
-      await p.waitFor('Word 3 playing', state(/^Playing Word 3 · 2 of/));
+      await p.waitFor('Word 3 playing', state(/^Playing Word 3 of 385 · part 2 of/));
       // 9-10. Pause: no progress.
       await p.page.click('#listen-pause');
       const paused = await p.waitFor('paused', state(/^Paused at Word 3\./));
@@ -473,22 +476,22 @@ test('browser: full sequence: auto-advance 1→2→3, Pause, Resume, Repeat, fin
       assert.equal(await place(s.url), 3, 'pause did not advance');
       // 11-12. Resume: the audio continues in Word 3.
       await p.page.click('#listen-play');
-      const resumed = await p.waitFor('resumed in Word 3', (e) => e.kind === 'state' && e.t > paused.t && /^Playing Word 3 · /.test(e.text));
+      const resumed = await p.waitFor('resumed in Word 3', (e) => e.kind === 'state' && e.t > paused.t && /^Playing Word 3 of 385 · part /.test(e.text));
       await p.waitFor('audio continues', (e) => e.kind === 'audio' && e.text === 'playing' && e.t > resumed.t);
       // 13-15. Repeat: Word 3 from its first line, no advance.
-      await p.waitFor('a later line of Word 3', (e) => e.kind === 'state' && e.t > resumed.t && /^Playing Word 3 · ([4-9]|1\d) of/.test(e.text));
+      await p.waitFor('a later line of Word 3', (e) => e.kind === 'state' && e.t > resumed.t && /^Playing Word 3 of 385 · part ([4-9]|1\d) of/.test(e.text));
       await p.page.click('#listen-repeat');
-      const again = await p.waitFor('Word 3 again from the start', (e) => e.kind === 'state' && e.t > resumed.t && e.text.startsWith('Playing Word 3 · 1 of'));
+      const again = await p.waitFor('Word 3 again from the start', (e) => e.kind === 'state' && e.t > resumed.t && e.text.startsWith('Playing Word 3 of 385 · part 1 of'));
       assert.equal(await place(s.url), 3, 'repeat did not advance');
       assert.equal(p.completes().filter((c) => c.position === 3).length, 0);
       // 16-17. Let it finish: exactly one advance.
-      await p.waitFor('Word 3 finished', (e) => e.kind === 'state' && e.t > again.t && e.text === 'Word 3 complete. Moving to Word 4…');
-      const w4 = await p.waitFor('Word 4 playing', state(/^Playing Word 4 · 1 of/));
+      await p.waitFor('Word 3 finished', (e) => e.kind === 'state' && e.t > again.t && e.text === "Word 3 complete. Now let's learn Word 4…");
+      const w4 = await p.waitFor('Word 4 playing', state(/^Playing Word 4 of 385 · part 1 of/));
       assert.deepEqual(p.completes().map((c) => c.position), [1, 2, 3], 'each word completed exactly once');
       assert.equal(await place(s.url), 4);
       // 18-20. Next: skips exactly one word; the skipped word is not completed.
       await p.page.click('#listen-next');
-      await p.waitFor('Word 5 after Next', (e) => e.kind === 'state' && e.t > w4.t && /^Playing Word 5 · 1 of/.test(e.text));
+      await p.waitFor('Word 5 after Next', (e) => e.kind === 'state' && e.t > w4.t && /^Playing Word 5 of 385 · part 1 of/.test(e.text));
       await p.page.click('#listen-pause');
       assert.ok(!(await p.texts('state')).some((t) => /Word 6/.test(t)), 'only one word skipped');
       assert.deepEqual(p.completes().map((c) => c.position), [1, 2, 3], 'Word 4 (skipped) was not completed');

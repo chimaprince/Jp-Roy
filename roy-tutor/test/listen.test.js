@@ -316,7 +316,7 @@ test('a failed audio line: the player stops on it, the word is not completed, Pl
   assert.equal(p.view.position, 1);
   assert.equal(p.view.index, 1, 'on the failed line');
   assert.equal(p.view.problem, 'audio');
-  assert.match(listenStatusText(p.view), /^Audio failed\. Word 1 is not complete\. ↻ Retry plays it again/);
+  assert.match(listenStatusText(p.view), /^Audio temporarily unavailable\. Word 1 is not complete\. ↻ Retry plays it again/);
   assert.deepEqual(completed, [], 'not completed');
   assert.deepEqual(errors, ['tts_failed'], 'the error is reported');
   await settle();
@@ -365,7 +365,7 @@ test('Qwen voice rate-limited (429 after the server\'s retries): pauses on that 
   await p.open(undefined);
   assert.equal(p.state, 'paused');
   assert.equal(p.view.problem, 'rate_limited');
-  assert.match(listenStatusText(p.view), /^Audio failed: .*rate limit.*Word 1 is not complete.*↻ Retry/);
+  assert.match(listenStatusText(p.view), /^Audio temporarily unavailable: .*rate limit.*Word 1 is not complete.*↻ Retry/);
   assert.deepEqual(completed, []);
   assert.deepEqual(errors, ['tts_rate_limited']);
   await settle();
@@ -445,8 +445,9 @@ test('the page wording: one shared place, never "press Next"; which word plays v
   assert.equal(listenWhereText(lesson(2), 2, 1), 'Now teaching: Word 2 of 385 · 1 word listened');
   assert.equal(listenWhereText(lesson(3), 1, 2), 'Now playing: Word 3 of 385, ahead of your place · your place stays at Word 1 (skipped, not completed yet) · 2 words listened');
   assert.match(listenWhereText(lesson(4, { review: true, reviewIndex: 0, reviewCount: 2 }), 9), /^Review 1 of 2 · Word 4/);
+  assert.equal(listenWhereText(lesson(1), 2, 1), 'Word 1 of 385 complete · your place is now Word 2 · 1 word listened', 'the moment between two words');
   const view = { state: 'gap', position: 1, review: false, next: { position: 2, review: false }, index: 6, steps: 7 };
-  assert.equal(listenStatusText(view), 'Word 1 complete. Moving to Word 2…');
+  assert.equal(listenStatusText(view), "Word 1 complete. Now let's learn Word 2…");
   assert.equal(listenStatusText({ ...view, state: 'loading', loadingTarget: { position: 2 } }), "Preparing Word 2 (the teacher's lesson and voice)…");
   for (const state of ['loading', 'playing', 'gap', 'paused', 'finished']) {
     assert.doesNotMatch(listenStatusText({ ...view, state }), /Finished this word|→ Next for the next word/);

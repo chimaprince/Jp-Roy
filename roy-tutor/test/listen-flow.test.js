@@ -91,8 +91,8 @@ test('continuous: Word 1 ends → Word 2 starts by itself → Word 2 ends → Wo
       'completed 2 -> place 3',
       'started 3',
     ], 'each word starts only after the previous one finished and was recorded');
-    assert.ok(statuses.includes('Word 1 complete. Moving to Word 2…'), statuses.join(' | '));
-    assert.ok(statuses.includes('Word 2 complete. Moving to Word 3…'));
+    assert.ok(statuses.includes("Word 1 complete. Now let's learn Word 2…"), statuses.join(' | '));
+    assert.ok(statuses.includes("Word 2 complete. Now let's learn Word 3…"));
     assert.ok(!statuses.some((t) => /Finished this word|→ Next for the next word/.test(t)), 'no "click Next" message');
     assert.equal(await place(s.url), 3, 'Interactive Practice is at word 3 too');
     assert.equal(q.seen.teacherTurns, 0);
@@ -165,6 +165,22 @@ test('the page and the server report the same version (a stale page is detected)
   const s = await startTutorServer(q.port);
   try {
     assert.equal((await (await fetch(`${s.url}/api/status`)).json()).version, pkg.version);
+    const v = await (await fetch(`${s.url}/api/version`)).json();
+    assert.equal(v.version, pkg.version, '/api/version');
+    assert.match(String(v.commit), /^[0-9a-f]{7,}$/, 'and the git commit that is running');
+    assert.match(s.output(), new RegExp(`Roy Medical Chinese tutor ${pkg.version.replace(/\./g, '\\.')} \\(commit ${v.commit}\\)`), 'printed at startup too');
+    assert.match(s.output(), /Serving the page from: .*public/);
+  } finally {
+    await s.stop();
+    await q.close();
+  }
+});
+
+test('TTS 429 backoff defaults to 1 s / 3 s / 8 s when QWEN_TTS_RETRY_MS is unset or empty (it must never become a single instant retry)', async () => {
+  const q = await startListenQwen();
+  const s = await startTutorServer(q.port, { QWEN_TTS_RETRY_MS: '' });
+  try {
+    assert.match(s.output(), /429 retried after 1000 \/ 3000 \/ 8000 ms/);
   } finally {
     await s.stop();
     await q.close();

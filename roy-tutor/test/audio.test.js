@@ -468,6 +468,22 @@ test('TTS 429 that does not clear: stops after the last retry with a clear "rate
   assert.equal(recovered.calls.length, 1);
 });
 
+test('TTS cancel during the spacing wait: a line the page gave up on (Pause) while it waited its turn is never sent', async () => {
+  const voice = countingVoice({ delayMs: 1 });
+  const store = new SpeechStore(voice, { log: quiet, minGapMs: 150 });
+  const [a, b] = lessonOf(store, ['playing line', 'look-ahead line']);
+  const paused = new AbortController();
+  const first = store.get(a);
+  const ahead = store.get(b, { signal: paused.signal });
+  ahead.catch(() => {});
+  await first; // line b now waits out the 150 ms gap
+  paused.abort(); // Pause
+  await new Promise((r) => setTimeout(r, 300));
+  assert.deepEqual(voice.calls, ['playing line'], 'the look-ahead line was not sent after Pause');
+  assert.ok((await store.get(b)).audio.length > 0, 'asked again later, it is generated normally');
+  assert.deepEqual(voice.calls, ['playing line', 'look-ahead line']);
+});
+
 test('TTS minimum gap: requests are spaced out', async () => {
   const voice = countingVoice({ delayMs: 1 });
   const store = new SpeechStore(voice, { log: quiet, minGapMs: 40 });

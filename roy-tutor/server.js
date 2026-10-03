@@ -1,5 +1,6 @@
 import { envFile, envKeysFromFile, envProblems, envNotices, envSource } from './src/env.js'; // must stay the first import
 import http from 'node:http';
+import { execSync } from 'node:child_process';
 import https from 'node:https';
 import OpenAI from 'openai'; // HTTP client for Qwen's OpenAI-compatible API (error types)
 import fs from 'node:fs';
@@ -41,7 +42,13 @@ for (const r of loadConfiguredCourses(db, path.join(here, 'data'))) {
 }
 const pkg = JSON.parse(fs.readFileSync(path.join(here, 'package.json'), 'utf8'));
 const teacher = createTeacher();
-console.log(`Roy Medical Chinese tutor ${pkg.version}`);
+// Which code is running: the version, the git commit and the folder the page
+// is served from (an old copy of the project elsewhere shows up here).
+const commit = (() => {
+  try { return execSync('git rev-parse --short HEAD', { cwd: here, stdio: ['ignore', 'pipe', 'ignore'], encoding: 'utf8' }).trim() || null; } catch { return null; }
+})();
+console.log(`Roy Medical Chinese tutor ${pkg.version}${commit ? ` (commit ${commit})` : ''}`);
+console.log(`Serving the page from: ${publicDir}`);
 console.log(envFile ? `Environment file: ${envFile}` : 'Environment file: none found (looked for roy-tutor/.env and the repository root .env)');
 envProblems.forEach((p) => console.error(`  ${p}`));
 envNotices.forEach((n) => console.warn(`  note: ${n}`));
@@ -60,7 +67,8 @@ const voice = createVoice();
 // before is never requested again; 429 is retried a few times with backoff.
 const audioCache = process.env.TUTOR_AUDIO_CACHE === 'off' ? null
   : path.resolve(process.env.TUTOR_AUDIO_CACHE || path.join(path.dirname(path.resolve(process.env.TUTOR_DB || path.join(here, 'tutor.db'))), 'audio-cache'));
-const retryDelays = (process.env.QWEN_TTS_RETRY_MS || '').split(',').map((v) => Number(v.trim())).filter((v) => Number.isFinite(v) && v >= 0);
+// (An unset or empty value keeps the default 1 s / 3 s / 8 s; '' must not become [0].)
+const retryDelays = (process.env.QWEN_TTS_RETRY_MS || '').split(',').map((v) => v.trim()).filter((v) => v !== '').map(Number).filter((v) => Number.isFinite(v) && v >= 0);
 const speech = new SpeechStore(voice, {
   cacheDir: audioCache,
   ...(retryDelays.length ? { retryDelays } : {}),
@@ -121,7 +129,7 @@ const serial = (fn) => (queue = queue.then(fn, fn));
 const withVoice = (result) => speech.attach(result);
 
 const routes = {
-  'GET /api/status': () => ({ ...tutor.status(), version: pkg.version, voice: { configured: voice.configured, asrModel: voice.asrModel, ttsModel: voice.ttsModel } }),
+  'GET /api/status': () => ({ ...tutor.status(), version: pkg.version, commit, voice: { configured: voice.configured, asrModel: voice.asrModel, ttsModel: voice.ttsModel } }),
   'POST /api/session/start': async () => withVoice(await tutor.start()),
   'POST /api/session/message': async (body) => withVoice(await tutor.message(String(body.text ?? '').slice(0, 500), {
     source: body.source === 'voice' ? 'voice' : 'text',
@@ -260,6 +268,8 @@ async function handler(req, res) {
       return send(res, err.status ?? 500, { error: err.status ? err.message : 'Something went wrong' });
     }
   }
+  // Which version is running (no access code needed: version and commit only).
+  if (req.method === 'GET' && url.pathname === '/api/version') return send(res, 200, { version: pkg.version, commit });
   if (!route && !isVoice) return req.method === 'GET' ? serveStatic(req, res) : send(res, 404, { error: 'Not found' });
   if (ACCESS_CODE && req.headers['x-access-code'] !== ACCESS_CODE) return send(res, 401, { error: 'Access code required' });
   try {
