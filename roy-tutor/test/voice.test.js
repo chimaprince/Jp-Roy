@@ -19,12 +19,12 @@ test('answer language: zh-CN for Mandarin, en-US for English', () => {
 // ---------- lesson state line ----------
 
 test('lesson state text follows the tutor\'s view of the lesson', () => {
-  assert.equal(lessonStateText({ stage: 'new', exercise: 'pronounce', card: { position: 1 } }), 'Word 1 · Say the Mandarin term');
-  assert.equal(lessonStateText({ stage: 'new', exercise: 'meaning', card: { position: 1 } }), 'Word 1 · Explain the meaning in English');
-  assert.equal(lessonStateText({ stage: 'conversation', exercise: 'roleplay', role: 'Interpreter', card: { position: 2 } }), 'Word 2 · Role-play (you are the interpreter)');
-  assert.equal(lessonStateText({ stage: 'review', exercise: 'review', card: { position: 1 } }), 'Word 1 · Review: say the Mandarin');
-  assert.equal(lessonStateText({ stage: 'new', exercise: 'pronounce', jump: true, card: { position: 12 } }), 'Word 12 · Say the Mandarin term · side trip, your place is saved');
-  assert.equal(lessonStateText({ stage: 'done' }), 'All words complete');
+  assert.equal(lessonStateText({ stage: 'new', exercise: 'pronounce', card: { position: 1 } }), 'Item 1 · Say the Mandarin term');
+  assert.equal(lessonStateText({ stage: 'new', exercise: 'meaning', card: { position: 1 } }), 'Item 1 · Explain the meaning in English');
+  assert.equal(lessonStateText({ stage: 'conversation', exercise: 'roleplay', role: 'Interpreter', card: { position: 2 } }), 'Item 2 · Role-play (you are the interpreter)');
+  assert.equal(lessonStateText({ stage: 'review', exercise: 'review', card: { position: 1 } }), 'Item 1 · Review: say the Mandarin');
+  assert.equal(lessonStateText({ stage: 'new', exercise: 'pronounce', jump: true, card: { position: 12 } }), 'Item 12 · Say the Mandarin term · side trip, your place is saved');
+  assert.equal(lessonStateText({ stage: 'done' }), 'All items complete');
 });
 
 // ---------- error messages ----------

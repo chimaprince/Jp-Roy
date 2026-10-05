@@ -29,9 +29,9 @@ const EXERCISE_TEXT = {
 
 export function lessonStateText(view) {
   if (!view) return '';
-  if (view.stage === 'done') return 'All words complete';
+  if (view.stage === 'done') return 'All items complete';
   const parts = [];
-  if (view.card?.position) parts.push(`Word ${view.card.position}`);
+  if (view.card?.position) parts.push(`Item ${view.card.position}`);
   const what = EXERCISE_TEXT[view.exercise];
   if (what) parts.push(view.exercise === 'roleplay' && view.role ? `${what} (you are the ${view.role.toLowerCase()})` : what);
   if (view.jump) parts.push('side trip, your place is saved');
@@ -430,9 +430,9 @@ export class ListenController {
 
 // The Listen & Learn status line. Continuous listening: after a word, the
 // next one starts by itself, and the line says so.
-const wordName = (t) => (t ? `${t.review ? 'review of ' : ''}Word ${t.position}` : 'the lesson');
+const wordName = (t) => (t ? `${t.review ? 'review of ' : ''}Item ${t.position}` : 'the lesson');
 export function listenStatusText(view) {
-  const here = view.position ? `${view.review ? 'Review of ' : ''}Word ${view.position}` : '';
+  const here = view.position ? `${view.review ? 'Review of ' : ''}Item ${view.position}` : '';
   switch (view.state) {
     case 'loading': return view.loadingTarget ? `Preparing ${wordName(view.loadingTarget)} (the teacher's lesson and voice)…` : 'Preparing the lesson…';
     case 'playing': return `Playing ${here}${view.review || !view.total ? '' : ` of ${view.total}`} · part ${view.index + 1} of ${view.steps}`;
@@ -450,14 +450,14 @@ export function listenStatusText(view) {
 // Which word is playing, and how it relates to Roy's one shared place in the
 // course (the first word he has not completed yet).
 export function listenWhereText(lesson, place, listened = 0) {
-  const heard = ` · ${listened} ${listened === 1 ? 'word' : 'words'} listened`;
-  if (lesson.review) return `Review ${lesson.reviewIndex + 1} of ${lesson.reviewCount} · Word ${lesson.position} (a word from your last session)${heard}`;
-  const word = `Word ${lesson.position} of ${lesson.total}`;
+  const heard = ` · ${listened} ${listened === 1 ? 'item' : 'items'} listened`;
+  if (lesson.review) return `Review ${lesson.reviewIndex + 1} of ${lesson.reviewCount} · Item ${lesson.position} (from your last session)${heard}`;
+  const word = `Item ${lesson.position} of ${lesson.total}`;
   if (!place || place === lesson.position) return `Now teaching: ${word}${heard}`;
-  if (lesson.position > place) return `Now playing: ${word}, ahead of your place · your place stays at Word ${place} (skipped, not completed yet)${heard}`;
-  return `${word} complete · your place is now Word ${place}${heard}`;
+  if (lesson.position > place) return `Now playing: ${word}, ahead of your place · your place stays at Item ${place} (skipped, not completed yet)${heard}`;
+  return `${word} complete · your place is now Item ${place}${heard}`;
 }
 
 // Version of the page code; the server reports its own (package.json). A
 // difference means an old page or an old server process: reload / restart.
-export const CLIENT_VERSION = '1.1.0';
+export const CLIENT_VERSION = '1.2.0';

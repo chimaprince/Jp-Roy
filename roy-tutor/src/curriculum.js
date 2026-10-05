@@ -1,7 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-const REQUIRED = ['english', 'mandarin'];
+// Only the Chinese item is required: some documents give no English for an
+// item (the import report lists those; the teacher still teaches them).
+const REQUIRED = ['mandarin'];
 
 // Minimal RFC 4180 CSV parser (quoted fields, escaped quotes, newlines in quotes).
 export function parseCsv(text) {
@@ -53,12 +55,13 @@ export function validateEntries(rawEntries) {
       if (typeof e[key] !== 'string' || e[key] === '') errors.push(`position ${e.position}: missing ${key}`);
     }
     const blank = (v) => v === undefined || v === null || v === '';
+    if (blank(e.english)) warnings.push(`position ${e.position} (${e.mandarin}): no English in the source`);
     if (blank(e.pinyin)) warnings.push(`position ${e.position} (${e.english}): no pinyin in the source`);
     else if (typeof e.pinyin !== 'string') errors.push(`position ${e.position}: pinyin must be text`);
     if (blank(e.meaning)) warnings.push(`position ${e.position} (${e.english}): no meaning in the source`);
     return {
       position,
-      english: e.english,
+      english: blank(e.english) ? '' : String(e.english),
       mandarin: e.mandarin,
       pinyin: blank(e.pinyin) ? '' : e.pinyin,
       meaning: blank(e.meaning) ? null : String(e.meaning),

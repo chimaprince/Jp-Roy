@@ -3,10 +3,10 @@
 // The teaching itself is never per-document (see listencontent.js, teacher.js):
 // a document only supplies WHAT is learnt, in its own order.
 //
-// Supported: .docx (tables: one item per row; or one item per paragraph),
-// .txt (one item per line), .csv / .tsv, .json ({ entries: [...] }).
-// A .pdf cannot be read reliably without extra software: open it in Word,
-// save it as .docx, and add that.
+// Supported: .pdf (text PDFs: tables or lines; a scanned, image-only PDF is
+// refused with a clear message, never guessed), .docx (tables: one item per
+// row; or one item per paragraph), .txt (one item per line), .csv / .tsv,
+// .json ({ entries: [...] }).
 //
 // What happens to the text, and nothing more (as for JH Medics Volume 1):
 //   - English and meaning: outer spaces trimmed, a line break becomes a space.
@@ -242,23 +242,264 @@ export function entriesFromLines(lines) {
 
 // ---------- any file → entries ----------
 
-export function readDocument(file) {
-  const ext = path.extname(file).toLowerCase();
-  if (ext === '.pdf') throw new Error('PDF files cannot be read reliably here. Open the PDF in Word, save it as .docx, and add the .docx.');
-  if (ext === '.json') {
-    const json = JSON.parse(fs.readFileSync(file, 'utf8'));
-    return { entries: (json.entries ?? json).map((e, i) => ({ ...e, position: e.position ?? i + 1 })), from: 'JSON' };
+// ---------- .pdf (text PDFs; a scanned PDF is refused, never guessed) ----------
+
+const appDir = path.join(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..');
+
+// Text items with their positions → rows of cells (a table) or lines.
+// A table is rebuilt the way a reader sees it: columns are where text starts;
+// in each column, lines close together form one cell (a wrapped cell); cells
+// in different columns whose heights overlap form one row. This works whether
+// the cells are top-aligned or centred.
+// Text runs with exact positions, read from the page's drawing operations (one
+// run per text-drawing call, split where a run jumps more than a character).
+// pdf.js's own text content merges neighbouring table cells drawn on the same
+// line, so it cannot be used to tell columns apart.
+function textRuns(list, OPS) {
+  const runs = [];
+  let ctm = [1, 0, 0, 1, 0, 0];
+  const stack = [];
+  const mul = (m, n) => [m[0] * n[0] + m[2] * n[1], m[1] * n[0] + m[3] * n[1], m[0] * n[2] + m[2] * n[3], m[1] * n[2] + m[3] * n[3], m[0] * n[4] + m[2] * n[5] + m[4], m[1] * n[4] + m[3] * n[5] + m[5]];
+  let tm = [1, 0, 0, 1, 0, 0];
+  let tlm = [1, 0, 0, 1, 0, 0];
+  let size = 10;
+  let charSpacing = 0;
+  let wordSpacing = 0;
+  let hScale = 1;
+  let leading = 0;
+  let font = null;
+  const at = () => { const m = mul(ctm, tm); return { x: m[4], y: m[5], scale: Math.hypot(m[2], m[3]) || 1 }; };
+  list.fnArray.forEach((fn, i) => {
+    const a = list.argsArray[i];
+    if (fn === OPS.save) stack.push({ ctm, size, charSpacing, wordSpacing, hScale, leading, font });
+    else if (fn === OPS.restore) { const st = stack.pop(); if (st) ({ ctm, size, charSpacing, wordSpacing, hScale, leading, font } = st); }
+    else if (fn === OPS.transform) ctm = mul(ctm, a);
+    else if (fn === OPS.beginText) { tm = [1, 0, 0, 1, 0, 0]; tlm = tm; }
+    else if (fn === OPS.setFont) { size = a[1]; font = a[0]; }
+    else if (fn === OPS.setCharSpacing) charSpacing = a[0];
+    else if (fn === OPS.setWordSpacing) wordSpacing = a[0];
+    else if (fn === OPS.setHScale) hScale = a[0] / 100;
+    else if (fn === OPS.setLeading) leading = a[0];
+    else if (fn === OPS.setTextMatrix) { tm = [...a]; tlm = tm; }
+    else if (fn === OPS.moveText || fn === OPS.setLeadingMoveText) { if (fn === OPS.setLeadingMoveText) leading = -a[1]; tlm = mul(tlm, [1, 0, 0, 1, a[0], a[1]]); tm = tlm; }
+    else if (fn === OPS.nextLine) { tlm = mul(tlm, [1, 0, 0, 1, 0, -leading]); tm = tlm; }
+    else if (fn === OPS.showText || fn === OPS.showSpacedText || fn === OPS.nextLineShowText || fn === OPS.nextLineSetSpacingShowText) {
+      if (fn === OPS.nextLineShowText || fn === OPS.nextLineSetSpacingShowText) { tlm = mul(tlm, [1, 0, 0, 1, 0, -leading]); tm = tlm; }
+      const glyphs = a[0];
+      let run = null;
+      const start = () => { const p = at(); run = { str: '', x: p.x, y: p.y, size: size * p.scale, end: p.x, page: 0 }; runs.push(run); };
+      const advance = (tx) => { tm = mul(tm, [1, 0, 0, 1, tx, 0]); };
+      for (const g of glyphs) {
+        if (typeof g === 'number') {
+          const tx = (-g / 1000) * size * hScale;
+          if (Math.abs(tx) > size * 1.0) run = null; // a jump: the next glyphs are a new run
+          advance(tx);
+          continue;
+        }
+        if (!g) continue;
+        if (!run) start();
+        const w = ((g.width ?? 0) / 1000) * size;
+        const tx = (w + charSpacing + (g.isSpace ? wordSpacing : 0)) * hScale;
+        run.str += g.unicode ?? '';
+        advance(tx);
+        run.end = at().x;
+      }
+    }
+  });
+  return runs
+    .filter((r) => r.str.trim())
+    .map((r) => ({ str: r.str, width: Math.abs(r.end - r.x), transform: [r.size, 0, 0, r.size, Math.min(r.x, r.end), r.y] }));
+}
+
+// The horizontal lines a table is drawn with (its row borders), per page, as
+// y positions. Thin filled rectangles and straight line segments both count.
+function horizontalRules(list, OPS) {
+  const ys = [];
+  let ctm = [1, 0, 0, 1, 0, 0];
+  const stack = [];
+  const mul = (m, n) => [m[0] * n[0] + m[2] * n[1], m[1] * n[0] + m[3] * n[1], m[0] * n[2] + m[2] * n[3], m[1] * n[2] + m[3] * n[3], m[0] * n[4] + m[2] * n[5] + m[4], m[1] * n[4] + m[3] * n[5] + m[5]];
+  const pt = (x, y) => [ctm[0] * x + ctm[2] * y + ctm[4], ctm[1] * x + ctm[3] * y + ctm[5]];
+  list.fnArray.forEach((fn, i) => {
+    const args = list.argsArray[i];
+    if (fn === OPS.save) stack.push(ctm);
+    else if (fn === OPS.restore) ctm = stack.pop() ?? [1, 0, 0, 1, 0, 0];
+    else if (fn === OPS.transform) ctm = mul(ctm, args);
+    else if (fn === OPS.constructPath) {
+      const [ops, coords] = args;
+      let k = 0;
+      let last = null;
+      for (const op of ops) {
+        if (op === OPS.rectangle) {
+          const [x, y, w, h] = coords.slice(k, k + 4);
+          k += 4;
+          const a = pt(x, y);
+          const b = pt(x + w, y + h);
+          if (Math.abs(a[1] - b[1]) <= 3 && Math.abs(a[0] - b[0]) >= 20) ys.push((a[1] + b[1]) / 2);
+        } else if (op === OPS.moveTo) { last = pt(coords[k], coords[k + 1]); k += 2; } else if (op === OPS.lineTo) {
+          const p2 = pt(coords[k], coords[k + 1]);
+          k += 2;
+          if (last && Math.abs(last[1] - p2[1]) <= 1 && Math.abs(last[0] - p2[0]) >= 20) ys.push(last[1]);
+          last = p2;
+        } else if (op === OPS.curveTo) k += 6;
+        else if (op === OPS.curveTo2 || op === OPS.curveTo3) k += 4;
+      }
+    }
+  });
+  const sorted = ys.sort((a, b) => b - a);
+  return sorted.filter((y, i) => i === 0 || sorted[i - 1] - y > 2);
+}
+
+function pdfRows(items, rules = {}) {
+  const parts = [];
+  for (const it of items) {
+    if (!it.str.trim()) continue;
+    parts.push({ page: it.page, x: it.transform[4], y: it.transform[5], end: it.transform[4] + it.width, size: Math.abs(it.transform[3]) || 10, text: it.str });
   }
-  if (ext === '.csv') return { entries: entriesFromRows(parseCsvRows(fs.readFileSync(file, 'utf8'))), from: 'CSV' };
-  if (ext === '.tsv') return { entries: entriesFromRows(fs.readFileSync(file, 'utf8').split(/\r?\n/).map((l) => l.split('\t'))), from: 'TSV' };
-  if (ext === '.txt' || ext === '.md') return { entries: entriesFromLines(fs.readFileSync(file, 'utf8').replace(/^﻿/, '').split(/\r?\n/)), from: 'text' };
-  if (ext === '.docx') {
-    const doc = readDocx(fs.readFileSync(file));
+  // Columns: left edges shared by many pieces of text.
+  const clusters = [];
+  for (const x of parts.map((f) => f.x).sort((a, b) => a - b)) {
+    const c = clusters.at(-1);
+    if (c && x - c.max <= 4) { c.max = x; c.n += 1; } else clusters.push({ min: x, max: x, n: 1 });
+  }
+  const columns = clusters.filter((c) => c.n >= Math.max(3, parts.length * 0.05)).map((c) => c.min);
+  const column = (x) => columns.reduce((best, s, i) => (s <= x + 4 ? i : best), 0);
+  // Lines; on a line, pieces of the same column join into one fragment (never across a column).
+  const lines = [];
+  for (const p of parts) {
+    let line = lines.find((l) => l.page === p.page && Math.abs(l.y - p.y) <= p.size * 0.4);
+    if (!line) { line = { page: p.page, y: p.y, size: p.size, parts: [] }; lines.push(line); }
+    line.parts.push(p);
+  }
+  lines.sort((a, b) => a.page - b.page || b.y - a.y);
+  const frags = [];
+  for (const l of lines) {
+    l.parts.sort((a, b) => a.x - b.x);
+    l.cells = [];
+    for (const p of l.parts) {
+      const last = l.cells.at(-1);
+      const col = columns.length ? column(p.x) : 0;
+      if (last && last.col === col && p.x - last.end <= l.size * 1.2) { last.text += (p.x - last.end > l.size * 0.15 ? ' ' : '') + p.text; last.end = p.end; } else l.cells.push({ x: p.x, end: p.end, text: p.text, col });
+    }
+    for (const c of l.cells) frags.push({ ...c, y: l.y, page: l.page, size: l.size });
+  }
+  if (columns.length < 2 || lines.filter((l) => l.cells.length >= 2).length < 2) return { lines: lines.map((l) => l.cells.map((c) => c.text).join(' ')) };
+  // A visual line wrap is not a line break in the document: rejoin with a
+  // space (nothing between two Chinese characters).
+  const rejoin = (a, b) => (new RegExp(`[${HAN}]$`, 'u').test(a) && new RegExp(`^[${HAN}]`, 'u').test(b) ? `${a}${b}` : `${a} ${b}`);
+  // A table drawn with row borders: each row is the band between two borders.
+  const ruled = Object.values(rules).some((r) => r.length >= 3);
+  if (ruled) {
+    const bands = new Map();
+    for (const f of frags) {
+      const r = rules[f.page] ?? [];
+      if (r.length < 2 || f.y > r[0] || f.y < r.at(-1)) continue; // outside the table (titles, page numbers)
+      const band = r.filter((y) => y > f.y).length;
+      const key = `${f.page}:${band}`;
+      if (!bands.has(key)) bands.set(key, { page: f.page, band, cells: Array(columns.length).fill('') });
+      const row = bands.get(key);
+      row.cells[f.col] = row.cells[f.col] ? rejoin(row.cells[f.col], f.text) : f.text;
+    }
+    return { rows: [...bands.values()].sort((a, b) => a.page - b.page || a.band - b.band).map((r) => r.cells) };
+  }
+  // Cell blocks: per page and column, consecutive lines no further apart than a line.
+  const blocks = [];
+  const open = new Map();
+  for (const f of frags) {
+    const key = `${f.page}:${f.col}`;
+    const b = open.get(key);
+    if (b && b.bottom - f.y <= f.size * 1.5) { b.text = rejoin(b.text, f.text); b.bottom = f.y; } else {
+      const nb = { page: f.page, col: f.col, top: f.y, bottom: f.y, size: f.size, text: f.text };
+      blocks.push(nb);
+      open.set(key, nb);
+    }
+  }
+  // Rows: blocks whose vertical extents overlap.
+  blocks.sort((a, b) => a.page - b.page || b.top - a.top);
+  const rows = [];
+  for (const b of blocks) {
+    const hi = b.top + b.size * 0.3;
+    const lo = b.bottom - b.size * 0.3;
+    const row = rows.find((r) => r.page === b.page && hi >= r.lo && lo <= r.hi);
+    if (row) { row.blocks.push(b); row.hi = Math.max(row.hi, hi); row.lo = Math.min(row.lo, lo); } else rows.push({ page: b.page, hi, lo, blocks: [b] });
+  }
+  rows.sort((a, b) => a.page - b.page || b.hi - a.hi);
+  return {
+    rows: rows.map((r) => {
+      const cells = Array(columns.length).fill('');
+      for (const b of r.blocks.sort((x, y) => y.top - x.top)) cells[b.col] = cells[b.col] ? rejoin(cells[b.col], b.text) : b.text;
+      return cells;
+    }),
+  };
+}
+
+async function readPdf(buf) {
+  if (buf.subarray(0, 5).toString('latin1') !== '%PDF-') throw new Error('This is not a readable PDF file.');
+  let pdfjs;
+  try { pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs'); } catch { throw new Error('PDF support is not installed. Run "npm install" in roy-tutor, then try again.'); }
+  let doc;
+  try {
+    doc = await pdfjs.getDocument({ data: new Uint8Array(buf), isEvalSupported: false, useSystemFonts: false, cMapUrl: `${path.join(appDir, 'node_modules', 'pdfjs-dist', 'cmaps')}${path.sep}`, cMapPacked: true, verbosity: 0 }).promise;
+  } catch (err) {
+    throw new Error(`This PDF could not be opened (${err.message}). Save it again as PDF, or as .docx.`);
+  }
+  const items = [];
+  const rules = {};
+  for (let n = 1; n <= doc.numPages; n++) {
+    const page = await doc.getPage(n);
+    let list = null;
+    try { list = await page.getOperatorList(); } catch { /* fall back to pdf.js text below */ }
+    const runs = list ? textRuns(list, pdfjs.OPS) : [];
+    if (runs.length) for (const r of runs) items.push({ ...r, page: n });
+    else for (const it of (await page.getTextContent()).items) if (it.str) items.push({ ...it, page: n });
+    try { rules[n] = list ? horizontalRules(list, pdfjs.OPS) : []; } catch { rules[n] = []; }
+  }
+  const readable = items.map((i) => i.str).join('').replace(/\s/g, '').length;
+  if (readable < 10 * Math.max(1, Math.min(doc.numPages, 3)) / 3) {
+    throw new Error('This PDF has no readable text: it looks like a scanned image. It needs OCR (text recognition) first, or add the Word (.docx) or text version of the document instead. Nothing was imported.');
+  }
+  if (!new RegExp(`[${HAN}]`, 'u').test(items.map((i) => i.str).join(''))) {
+    throw new Error('This PDF has text but no Chinese characters, so it has no Chinese items to learn. Nothing was imported.');
+  }
+  const { rows, lines } = pdfRows(items, rules);
+  return rows ? { entries: entriesFromRows(rows), from: `PDF table (${doc.numPages} page${doc.numPages === 1 ? '' : 's'})` } : { entries: entriesFromLines(lines), from: `PDF text (${doc.numPages} page${doc.numPages === 1 ? '' : 's'})` };
+}
+
+// ---------- any document → entries ----------
+
+export const DOCUMENT_TYPES = ['.pdf', '.docx', '.txt', '.csv', '.tsv', '.json'];
+export const MAX_DOCUMENT_BYTES = 15 * 1024 * 1024;
+
+// A document given as its file name and contents (an upload, or a file read
+// from disk). Resolves to { entries, from }; rejects with a message for Roy.
+export async function readDocumentBuffer(name, buf) {
+  const ext = path.extname(String(name)).toLowerCase();
+  if (!DOCUMENT_TYPES.includes(ext)) throw new Error(`Unsupported file type ${ext || '(none)'}. Use PDF, Word (.docx), text (.txt), CSV, TSV or JSON.`);
+  if (!buf?.length) throw new Error('The file is empty.');
+  if (buf.length > MAX_DOCUMENT_BYTES) throw new Error(`The file is too large (over ${MAX_DOCUMENT_BYTES / 1024 / 1024} MB).`);
+  const text = () => buf.toString('utf8').replace(/^﻿/, '');
+  let out;
+  if (ext === '.pdf') out = await readPdf(buf);
+  else if (ext === '.json') {
+    let json;
+    try { json = JSON.parse(text()); } catch { throw new Error('The JSON file is not valid JSON.'); }
+    const list = Array.isArray(json) ? json : json.entries;
+    if (!Array.isArray(list)) throw new Error('The JSON file has no "entries" list.');
+    out = { entries: list.map((e, i) => ({ ...e, position: e.position ?? i + 1 })), from: 'JSON' };
+  } else if (ext === '.csv') out = { entries: entriesFromRows(parseCsvRows(text())), from: 'CSV' };
+  else if (ext === '.tsv') out = { entries: entriesFromRows(text().split(/\r?\n/).map((l) => l.split('\t'))), from: 'TSV' };
+  else if (ext === '.txt') out = { entries: entriesFromLines(text().split(/\r?\n/)), from: 'text' };
+  else {
+    let doc;
+    try { doc = readDocx(buf); } catch (err) { throw new Error(`This Word file could not be read (${err.message}).`); }
     const table = doc.tables.sort((a, b) => b.length - a.length)[0];
-    if (table && table.length >= 2) return { entries: entriesFromRows(table), from: `Word table (${table.length} rows)` };
-    return { entries: entriesFromLines(doc.paragraphs.flatMap((p) => p.split('\n'))), from: 'Word paragraphs' };
+    out = table && table.length >= 2 ? { entries: entriesFromRows(table), from: `Word table (${table.length} rows)` } : { entries: entriesFromLines(doc.paragraphs.flatMap((p) => p.split('\n'))), from: 'Word paragraphs' };
   }
-  throw new Error(`unsupported file type ${ext || '(none)'}: use .docx, .txt, .csv, .tsv or .json`);
+  if (!out.entries.length) throw new Error('No items with Chinese were found in this document, so nothing was imported.');
+  return out;
+}
+
+export function readDocument(file) {
+  return readDocumentBuffer(path.basename(file), fs.readFileSync(file));
 }
 
 // CSV rows as arrays (curriculum.parseCsv returns objects keyed by header).

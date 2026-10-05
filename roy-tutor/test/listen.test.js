@@ -317,7 +317,7 @@ test('a failed audio line: the player stops on it, the word is not completed, Pl
   assert.equal(p.view.position, 1);
   assert.equal(p.view.index, 1, 'on the failed line');
   assert.equal(p.view.problem, 'audio');
-  assert.match(listenStatusText(p.view), /^Audio temporarily unavailable\. Word 1 is not complete\. ↻ Retry plays it again/);
+  assert.match(listenStatusText(p.view), /^Audio temporarily unavailable\. Item 1 is not complete\. ↻ Retry plays it again/);
   assert.deepEqual(completed, [], 'not completed');
   assert.deepEqual(errors, ['tts_failed'], 'the error is reported');
   await settle();
@@ -366,7 +366,7 @@ test('Qwen voice rate-limited (429 after the server\'s retries): pauses on that 
   await p.open(undefined);
   assert.equal(p.state, 'paused');
   assert.equal(p.view.problem, 'rate_limited');
-  assert.match(listenStatusText(p.view), /^Audio temporarily unavailable: .*rate limit.*Word 1 is not complete.*↻ Retry/);
+  assert.match(listenStatusText(p.view), /^Audio temporarily unavailable: .*rate limit.*Item 1 is not complete.*↻ Retry/);
   assert.deepEqual(completed, []);
   assert.deepEqual(errors, ['tts_rate_limited']);
   await settle();
@@ -443,13 +443,13 @@ test('the Listen code path never asks for the microphone', () => {
 
 test('the page wording: one shared place, never "press Next"; which word plays vs. where the place is', () => {
   const lesson = (position, extra = {}) => ({ position, total: 385, review: false, ...extra });
-  assert.equal(listenWhereText(lesson(2), 2, 1), 'Now teaching: Word 2 of 385 · 1 word listened');
-  assert.equal(listenWhereText(lesson(3), 1, 2), 'Now playing: Word 3 of 385, ahead of your place · your place stays at Word 1 (skipped, not completed yet) · 2 words listened');
-  assert.match(listenWhereText(lesson(4, { review: true, reviewIndex: 0, reviewCount: 2 }), 9), /^Review 1 of 2 · Word 4/);
-  assert.equal(listenWhereText(lesson(1), 2, 1), 'Word 1 of 385 complete · your place is now Word 2 · 1 word listened', 'the moment between two words');
+  assert.equal(listenWhereText(lesson(2), 2, 1), 'Now teaching: Item 2 of 385 · 1 item listened');
+  assert.equal(listenWhereText(lesson(3), 1, 2), 'Now playing: Item 3 of 385, ahead of your place · your place stays at Item 1 (skipped, not completed yet) · 2 items listened');
+  assert.match(listenWhereText(lesson(4, { review: true, reviewIndex: 0, reviewCount: 2 }), 9), /^Review 1 of 2 · Item 4/);
+  assert.equal(listenWhereText(lesson(1), 2, 1), 'Item 1 of 385 complete · your place is now Item 2 · 1 item listened', 'the moment between two words');
   const view = { state: 'gap', position: 1, review: false, next: { position: 2, review: false }, index: 6, steps: 7 };
-  assert.equal(listenStatusText(view), "Word 1 complete. Now let's learn Word 2…");
-  assert.equal(listenStatusText({ ...view, state: 'loading', loadingTarget: { position: 2 } }), "Preparing Word 2 (the teacher's lesson and voice)…");
+  assert.equal(listenStatusText(view), "Item 1 complete. Now let's learn Item 2…");
+  assert.equal(listenStatusText({ ...view, state: 'loading', loadingTarget: { position: 2 } }), "Preparing Item 2 (the teacher's lesson and voice)…");
   for (const state of ['loading', 'playing', 'gap', 'paused', 'finished']) {
     assert.doesNotMatch(listenStatusText({ ...view, state }), /Finished this word|→ Next for the next word/);
   }
@@ -493,7 +493,7 @@ test('REGRESSION: Word 1\'s final clip ends → Word 1 completed → Word 2 load
   assert.deepEqual(audio.played(), ['w1-1', 'w1-2', 'w1-3']);
   assert.deepEqual(completed, [], 'not complete before the FINAL clip ends');
   audio.last().end(); await settle(); // the final clip ended
-  assert.deepEqual(completed, [1], 'Word 1 completed on the final ended');
+  assert.deepEqual(completed, [1], 'Item 1 completed on the final ended');
   assert.ok(loaded.includes(2), 'Word 2 lesson loaded');
   assert.equal(p.view.position, 2);
   assert.equal(p.state, 'playing');
@@ -537,9 +537,9 @@ test('REGRESSION: a stale ended from Word 1 arriving after Next (Word 2 playing)
   assert.equal(p.view.position, 2);
   assert.equal(p.view.index, 0, 'still on Word 2\'s first clip');
   assert.deepEqual(audio.played(), ['w1-1', 'w2-1'], 'nothing extra played');
-  assert.deepEqual(completed, [], 'the skipped Word 1 is not completed');
+  assert.deepEqual(completed, [], 'the skipped Item 1 is not completed');
   for (let i = 0; i < 3; i++) { audio.last().end(); await settle(); }
-  assert.deepEqual(completed, [2], 'Word 2 completes normally');
+  assert.deepEqual(completed, [2], 'Item 2 completes normally');
 });
 
 test('REGRESSION: Repeat restarts the word; a late ended from before the Repeat is ignored; after the replay it continues to Word 2 by itself', async () => {

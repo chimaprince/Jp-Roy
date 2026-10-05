@@ -113,6 +113,7 @@ export async function startTutorServer(qwenPort, extraEnv = {}) {
     child.stdout.on('data', (d) => { out += d; if (out.includes('tutor on')) { clearTimeout(t); resolve(); } });
     child.stderr.on('data', (d) => { out += d; });
   });
-  const stop = () => { const exited = new Promise((r) => child.once('exit', r)); child.kill(); return exited; };
+  let exited = null;
+  const stop = () => { if (!exited) { exited = child.exitCode !== null ? Promise.resolve() : new Promise((r) => child.once('exit', r)); child.kill(); } return exited; };
   return { url: `http://localhost:${port}`, stop, output: () => out };
 }

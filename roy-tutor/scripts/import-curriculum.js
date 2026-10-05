@@ -4,17 +4,20 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openDb } from '../src/db.js';
-import { loadConfiguredCourses, loadEntriesFile, importEntries } from '../src/curriculum.js';
+import { loadEntriesFile, importEntries } from '../src/curriculum.js';
+import { createCatalog } from '../src/courses.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const dataDir = path.join(here, '..', 'data');
 const args = process.argv.slice(2);
 const arg = (name) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : undefined; };
 
-const db = openDb();
+const dbFile = path.resolve(process.env.TUTOR_DB || path.join(here, '..', 'tutor.db'));
+const db = openDb(dbFile);
+const catalog = createCatalog({ db, builtinDir: path.resolve(process.env.TUTOR_DATA_DIR || dataDir), userDir: path.resolve(process.env.TUTOR_COURSES_DIR || path.join(path.dirname(dbFile), 'courses')) });
 const results = arg('--file')
   ? [{ course: arg('--course'), ...importEntries(db, arg('--course'), loadEntriesFile(arg('--file')).entries) }]
-  : loadConfiguredCourses(db, dataDir);
+  : catalog.load();
 
 let failed = false;
 for (const r of results) {

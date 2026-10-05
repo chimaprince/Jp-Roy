@@ -136,3 +136,16 @@ h1 { margin: 0; font-size: 1.5rem; letter-spacing: 0.06em; }
 .version { text-align: center; color: var(--muted); font-size: 0.75rem; margin-top: 24px; }
 
 .build { margin: 0.1rem 0 0.4rem; font-size: 0.8rem; letter-spacing: 0.04em; opacity: 0.75; }
+
+.courses { margin: 0.4rem 0 0.8rem; font-size: 0.95rem; }
+.courses summary { cursor: pointer; font-weight: 600; padding: 0.3rem 0; }
+.courses-note, .course-msg { font-size: 0.85rem; opacity: 0.8; margin: 0.3rem 0; }
+.courses-head { font-weight: 600; margin: 0.8rem 0 0.3rem; }
+#course-list { list-style: none; padding: 0; margin: 0.3rem 0; }
+#course-list li { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.4rem; padding: 0.45rem 0; border-bottom: 1px solid rgba(127, 127, 127, 0.25); }
+#course-list .course-name { font-weight: 600; }
+#course-list .course-place { font-size: 0.85rem; opacity: 0.8; }
+#course-list .course-active { font-size: 0.85rem; font-weight: 600; }
+#course-upload { display: flex; flex-direction: column; gap: 0.4rem; }
+#course-upload input[type=text], #course-upload input[type=file] { max-width: 100%; font-size: 1rem; }
+.course-now { font-size: 0.9rem; }

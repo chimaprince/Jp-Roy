@@ -129,8 +129,8 @@ function renderStatus(status) {
   if (!status?.course) return;
   if (status.course.title) $('course').textContent = status.course.title.toUpperCase();
   $('progress').textContent = status.finished
-    ? `Progress: all ${status.total} words complete`
-    : `Progress: Word ${status.position} of ${status.total}`;
+    ? `Progress: all ${status.total} items complete`
+    : `Progress: Item ${status.position} of ${status.total}`;
 }
 
 function renderView(view) {
@@ -141,7 +141,7 @@ function renderView(view) {
   const card = view.card;
   $('card').hidden = !card;
   if (!card) return;
-  $('card-position').textContent = `Word ${card.position}${card.sourcePage ? ` · page ${card.sourcePage}` : ''}`;
+  $('card-position').textContent = `Item ${card.position}${card.sourcePage ? ` · page ${card.sourcePage}` : ''}`;
   $('card-mandarin').textContent = card.mandarin ?? '？';
   $('card-pinyin').textContent = card.pinyin ?? '';
   $('card-english').textContent = card.english ?? '？';
@@ -641,6 +641,7 @@ async function showHome() {
   } catch (err) {
     notice(friendlyError(err));
   }
+  loadCourses();
 }
 
 // Stop everything Interactive Practice is doing (the microphone is released).
@@ -658,6 +659,108 @@ $('mode-interactive').addEventListener('click', () => {
   showMode('interactive');
   // Start, or resume today's session (Listen & Learn may have moved the word on).
   if (!BUSY_STATES.has(state) && state !== 'listening' && state !== 'speaking') startSession();
+});
+
+$('interactive-exit').addEventListener('click', () => {
+  // Back to the home screen; today's session and progress stay on the server.
+  leaveInteractive();
+  showMode(null);
+  notice('');
+  showHome();
+});
+
+// ---------- Courses: one teacher, any course document ----------
+
+function renderCourses(list) {
+  const ul = $('course-list');
+  ul.replaceChildren();
+  for (const c of list) {
+    const li = document.createElement('li');
+    li.dataset.course = c.id;
+    const info = document.createElement('span');
+    const name = document.createElement('span');
+    name.className = 'course-name';
+    name.textContent = c.title; // text, never HTML
+    const place = document.createElement('span');
+    place.className = 'course-place';
+    place.textContent = c.finished ? ` · all ${c.items} items complete` : ` · Item ${c.position} of ${c.items}`;
+    info.append(name, place);
+    li.append(info);
+    if (c.active) {
+      const tag = document.createElement('span');
+      tag.className = 'course-active';
+      tag.textContent = '✓ Studying now';
+      li.append(tag);
+    } else {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.textContent = 'Study this course';
+      btn.addEventListener('click', () => switchCourse(c.id));
+      li.append(btn);
+    }
+    ul.append(li);
+  }
+}
+
+async function loadCourses() {
+  try { renderCourses((await api('GET', '/api/courses')).courses); } catch { /* the course list is optional on the home screen */ }
+}
+
+// Everything the page shows for the new course comes in the same answer
+// (title, place, current item), so the page changes at once.
+function applyCourseView(view) {
+  renderCourses(view.courses);
+  renderStatus(view.status);
+  latestPosition = null;
+  listenedWords = null;
+  $('log').replaceChildren();
+  if (view.card) renderView({ card: view.card, stage: null });
+}
+
+function stopModes() {
+  if (learnMode === 'listen') listenPlayer.exit();
+  leaveInteractive();
+  showMode(null);
+}
+
+async function switchCourse(id) {
+  stopModes();
+  try {
+    const view = await api('POST', '/api/courses/active', { id });
+    applyCourseView(view);
+    const now = view.courses.find((c) => c.active);
+    notice(now ? `Now studying ${now.title}: Item ${now.position} of ${now.items}.` : '');
+  } catch (err) {
+    notice(friendlyError(err));
+  }
+}
+
+$('course-upload').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const file = $('course-file').files[0];
+  const msg = $('course-msg');
+  if (!file) return;
+  msg.textContent = `Reading ${file.name}…`;
+  $('course-add').disabled = true;
+  try {
+    const activate = $('course-activate').checked;
+    if (activate) stopModes();
+    const res = await request('/api/courses/upload', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream', 'X-File-Name': encodeURIComponent(file.name), 'X-Course-Title': encodeURIComponent($('course-title').value), 'X-Activate': activate ? '1' : '0' },
+      body: file,
+    });
+    const view = await res.json();
+    const r = view.report;
+    msg.textContent = `Added "${view.course.title}": ${r.items} items (from ${r.from}). Without pinyin: ${r.withoutPinyin}, without English: ${r.withoutEnglish}, without a meaning: ${r.withoutMeaning}. The teacher still teaches every item. ${view.course.active ? 'You are now studying it.' : 'It waits until you choose "Study this course".'}`;
+    if (view.course.active) applyCourseView(view);
+    else renderCourses(view.courses);
+    $('course-upload').reset();
+  } catch (err) {
+    msg.textContent = friendlyError(err);
+  } finally {
+    $('course-add').disabled = false;
+  }
 });
 
 $('mode-listen').addEventListener('click', () => {

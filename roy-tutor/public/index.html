@@ -12,9 +12,23 @@
       <h1>ROY MEDICAL CHINESE</h1>
       <p class="build" id="build">Version …</p>
       <p class="course" id="course">Loading the course…</p>
-      <p class="progress" id="progress">Progress: Word – of –</p>
+      <p class="progress" id="progress">Progress: Item – of –</p>
       <p class="lesson" id="lesson-state" aria-live="polite"></p>
     </header>
+
+    <details class="courses" id="courses">
+      <summary>Courses</summary>
+      <p class="courses-note">One teacher for every course. Each course keeps its own place.</p>
+      <ul id="course-list" aria-label="Your courses"></ul>
+      <form id="course-upload">
+        <p class="courses-head">Add a course document</p>
+        <input id="course-file" type="file" accept=".pdf,.docx,.txt,.csv,.tsv,.json" required>
+        <input id="course-title" type="text" maxlength="80" placeholder="Course name (e.g. Ward Phrases Volume 2)">
+        <label class="course-now"><input id="course-activate" type="checkbox"> Start studying it now</label>
+        <button type="submit" id="course-add">Add course</button>
+        <p class="course-msg" id="course-msg" aria-live="polite"></p>
+      </form>
+    </details>
 
     <section class="card" id="card" hidden aria-live="polite">
       <p class="position" id="card-position"></p>
@@ -36,7 +50,7 @@
         <span class="label">Today:</span>
         <ol id="stages">
           <li data-stage="review">Review</li>
-          <li data-stage="new">New Words</li>
+          <li data-stage="new">New Items</li>
           <li data-stage="conversation">Conversation</li>
         </ol>
       </section>
@@ -57,6 +71,7 @@
       </section>
 
       <section class="log" id="log" aria-label="Conversation"></section>
+      <button id="interactive-exit" class="listen-exit" type="button">Exit Interactive Practice</button>
 
       <details class="type-instead">
         <summary>No microphone? Type instead</summary>

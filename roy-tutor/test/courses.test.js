@@ -22,6 +22,7 @@ import { startListenQwen, startTutorServer, cleanEnv } from './helpers.js';
 
 const appDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const JH_DOCX = path.join(appDir, 'data', 'source', 'JH_MEDICS_TRAINING_MANDARIN11.docx');
+const FIXTURES = path.join(appDir, 'test', 'fixtures');
 const JH_JSON = JSON.parse(fs.readFileSync(path.join(appDir, 'data', 'jh-medics-vol1.json'), 'utf8')).entries;
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'roy-course-'));
 
@@ -66,8 +67,8 @@ const row = (...cells) => `<w:tr>${cells.map((c) => `<w:tc>${p(c)}</w:tc>`).join
 
 // ---------- reading any document ----------
 
-test('the generic reader rebuilds JH Medics Volume 1 from its original Word file exactly (no JH-specific code)', () => {
-  const { entries, from } = readDocument(JH_DOCX);
+test('the generic reader rebuilds JH Medics Volume 1 from its original Word file exactly (no JH-specific code)', async () => {
+  const { entries, from } = await readDocument(JH_DOCX);
   assert.match(from, /Word table/);
   assert.equal(entries.length, 385);
   for (let i = 0; i < 385; i++) {
@@ -78,28 +79,51 @@ test('the generic reader rebuilds JH Medics Volume 1 from its original Word file
   }
 });
 
-test('documents of other shapes: text lines, CSV/TSV with or without headers, Word tables in any column order, Word paragraphs; PDF is refused clearly', () => {
+test('PDF: the same 385 JH Medics entries from a 22-page PDF table (wrapped cells, tight rows); a text-list PDF; a scanned PDF is refused, never guessed', async () => {
+  const norm = (v) => String(v ?? '').replace(/\s+/g, ' ').replace(/\s*-\s*/g, '-').trim();
+  const pdf = await readDocument(path.join(FIXTURES, 'jh-vol1-table.pdf'));
+  assert.match(pdf.from, /^PDF table \(22 pages\)$/);
+  assert.equal(pdf.entries.length, 385);
+  for (let i = 0; i < 385; i++) {
+    for (const k of ['english', 'mandarin', 'pinyin', 'meaning']) assert.equal(norm(pdf.entries[i][k]), norm(JH_JSON[i][k]), `PDF entry ${i + 1} ${k}`);
+  }
+  const small = await readDocument(path.join(FIXTURES, 'course-table.pdf'));
+  assert.deepEqual(small.entries.map((e) => [e.mandarin, e.pinyin, e.english]), [['硬膜外', 'yìng mó wài', 'epidural'], ['食道', 'shí dào', 'esophagus'], ['血压', 'xuè yā', 'blood pressure'], ['挂号', 'guà hào', 'register (at the hospital)']], 'a title line above the table is not an item');
+  const lines = await readDocument(path.join(FIXTURES, 'clinic-lines.pdf'));
+  assert.match(lines.from, /^PDF text/);
+  assert.deepEqual(lines.entries.map((e) => e.mandarin), ['挂号', '发烧', '请把袖子卷起来。', '预约']);
+  await assert.rejects(readDocument(path.join(FIXTURES, 'scanned.pdf')), /no readable text: it looks like a scanned image\. It needs OCR .* Nothing was imported/);
+});
+
+test('documents of other shapes: text lines, CSV/TSV with or without headers, Word tables in any column order, Word paragraphs; bad files are refused clearly', async () => {
   const dir = tmp();
   const write = (name, text) => { const f = path.join(dir, name); fs.writeFileSync(f, text); return f; };
-  const txt = readDocument(write('clinic.txt', CLINIC_TXT)).entries;
+  const txt = (await readDocument(write('clinic.txt', CLINIC_TXT))).entries;
   assert.deepEqual(txt.map((e) => [e.mandarin, e.pinyin, e.english, e.meaning]), [
     ['挂号', 'guà hào', 'register (at the hospital)', 'to sign in at the registration desk'],
     ['发烧', 'fā shāo', 'fever', 'a body temperature above normal'],
     ['请把袖子卷起来。', 'qǐng bǎ xiù zi juǎn qǐ lái', 'Please roll up your sleeve.', null],
     ['预约', '', 'make an appointment', null],
   ], 'a title line without Chinese is not an item; a neutral-tone syllable stays in the pinyin; missing pinyin stays missing');
-  const csv = readDocument(write('c.csv', 'Chinese,Pinyin,English,Meaning\n头痛,tóu tòng,headache,"pain in the head"\n恶心,ě xīn,nausea,\n')).entries;
+  const csv = (await readDocument(write('c.csv', 'Chinese,Pinyin,English,Meaning\n头痛,tóu tòng,headache,"pain in the head"\n恶心,ě xīn,nausea,\n'))).entries;
   assert.deepEqual(csv.map((e) => [e.mandarin, e.pinyin, e.english, e.meaning]), [['头痛', 'tóu tòng', 'headache', 'pain in the head'], ['恶心', 'ě xīn', 'nausea', null]]);
-  const tsv = readDocument(write('c.tsv', 'headache\t头痛 tóu tòng\tpain in the head, often with stress\nnausea\t恶心 ě xīn\tthe feeling of wanting to vomit\n')).entries;
+  const tsv = (await readDocument(write('c.tsv', 'headache\t头痛 tóu tòng\tpain in the head, often with stress\nnausea\t恶心 ě xīn\tthe feeling of wanting to vomit\n'))).entries;
   assert.deepEqual(tsv.map((e) => [e.mandarin, e.pinyin, e.english]), [['头痛', 'tóu tòng', 'headache'], ['恶心', 'ě xīn', 'nausea']], 'no header: columns found from the content');
-  const table = readDocument(write('t.docx', makeDocx(`<w:tbl>${row('Mandarin', 'English', 'Meaning')}${row('血压 xuè yā', 'blood pressure', 'The pressure of the blood in the arteries')}${row('心跳 xīn tiào', 'heartbeat', 'The beating of the heart')}</w:tbl>`))).entries;
+  const table = (await readDocument(write('t.docx', makeDocx(`<w:tbl>${row('Mandarin', 'English', 'Meaning')}${row('血压 xuè yā', 'blood pressure', 'The pressure of the blood in the arteries')}${row('心跳 xīn tiào', 'heartbeat', 'The beating of the heart')}</w:tbl>`)))).entries;
   assert.deepEqual(table.map((e) => [e.position, e.mandarin, e.pinyin, e.english, e.meaning]), [
     [1, '血压', 'xuè yā', 'blood pressure', 'The pressure of the blood in the arteries'],
     [2, '心跳', 'xīn tiào', 'heartbeat', 'The beating of the heart'],
   ]);
-  const paras = readDocument(write('d.docx', makeDocx(p('Dialogue course') + p('您哪里不舒服？ nín nǎ lǐ bù shū fu What is bothering you?') + p('我头疼。 wǒ tóu téng I have a headache.')))).entries;
+  const paras = (await readDocument(write('d.docx', makeDocx(p('Dialogue course') + p('您哪里不舒服？ nín nǎ lǐ bù shū fu What is bothering you?') + p('我头疼。 wǒ tóu téng I have a headache.'))))).entries;
   assert.deepEqual(paras.map((e) => [e.mandarin, e.english]), [['您哪里不舒服？', 'What is bothering you?'], ['我头疼。', 'I have a headache.']], 'a dialogue document: one sentence per item');
-  assert.throws(() => readDocument(write('x.pdf', '%PDF-1.4')), /save it as \.docx/);
+  const json = (await readDocument(write('j.json', JSON.stringify({ entries: [{ mandarin: '咳嗽', pinyin: 'ké sou', english: 'cough' }] })))).entries;
+  assert.deepEqual(json.map((e) => [e.position, e.mandarin]), [[1, '咳嗽']]);
+  await assert.rejects(readDocument(write('x.pdf', 'not really a pdf')), /not a readable PDF/);
+  await assert.rejects(readDocument(write('empty.txt', '')), /empty/);
+  await assert.rejects(readDocument(write('none.txt', 'A title\nonly English here\n')), /No items with Chinese were found/);
+  await assert.rejects(readDocument(write('x.exe', 'MZ')), /Unsupported file type \.exe/);
+  await assert.rejects(readDocument(write('bad.docx', 'not a zip')), /Word file could not be read/);
+  await assert.rejects(readDocument(write('bad.json', '{oops')), /not valid JSON/);
   assert.deepEqual(splitMandarin('乳房x光片 rǔ fáng x guāng piàn'), { mandarin: '乳房x光片', pinyin: 'rǔ fáng x guāng piàn' });
   assert.deepEqual(entriesFromLines(['no Chinese here', '']), []);
   assert.deepEqual(entriesFromLines(['发烧 fā shāo fever']).map((e) => [e.pinyin, e.english]), [['fā shāo', 'fever']], 'an English word is not taken for pinyin');
@@ -108,47 +132,119 @@ test('documents of other shapes: text lines, CSV/TSV with or without headers, Wo
 
 // ---------- the course command ----------
 
-function courseCmd(dataDir, db, ...args) {
-  return execFileSync(process.execPath, ['--disable-warning=ExperimentalWarning', 'scripts/course.mjs', ...args], { cwd: appDir, env: { ...cleanEnv(), TUTOR_DATA_DIR: dataDir, TUTOR_DB: db }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+function courseCmd(env, ...args) {
+  return execFileSync(process.execPath, ['--disable-warning=ExperimentalWarning', 'scripts/course.mjs', ...args], { cwd: appDir, env: { ...cleanEnv(), ...env }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 }
-function dataWithJh() {
+// A fresh install: the repository's built-in courses, an empty database next
+// to which added courses are kept.
+function freshInstall() {
   const dir = tmp();
-  const dataDir = path.join(dir, 'data');
-  fs.mkdirSync(dataDir);
-  fs.copyFileSync(path.join(appDir, 'data', 'courses.json'), path.join(dataDir, 'courses.json'));
-  fs.copyFileSync(path.join(appDir, 'data', 'jh-medics-vol1.json'), path.join(dataDir, 'jh-medics-vol1.json'));
   fs.writeFileSync(path.join(dir, 'clinic.txt'), CLINIC_TXT);
-  return { dir, dataDir, db: path.join(dir, 'cmd.db'), doc: path.join(dir, 'clinic.txt') };
+  return { dir, env: { TUTOR_DB: path.join(dir, 'tutor.db') }, doc: path.join(dir, 'clinic.txt') };
 }
 
-test('course command: a new document becomes a waiting course (the active course is never switched silently); activate switches; list shows both', () => {
-  const d = dataWithJh();
-  const out = courseCmd(d.dataDir, d.db, 'add', d.doc, '--title', 'Clinic Phrases');
+test('course command: a new document becomes a waiting course kept next to the database (never in the code folder); activate switches; list shows both with their own place', () => {
+  const d = freshInstall();
+  const out = courseCmd(d.env, 'add', d.doc, '--title', 'Clinic Phrases');
   assert.match(out, /clinic\.txt \(text\): 4 items, in the document's order/);
   assert.match(out, /without pinyin: 1/);
-  assert.match(out, /Added "Clinic Phrases" as a waiting course/);
-  let config = JSON.parse(fs.readFileSync(path.join(d.dataDir, 'courses.json'), 'utf8'));
-  assert.deepEqual(config.courses.map((c) => [c.id, c.status]), [['jh-medics-vol1', 'active'], ['clinic-phrases', 'staged']]);
-  const saved = JSON.parse(fs.readFileSync(path.join(d.dataDir, 'clinic-phrases.json'), 'utf8'));
-  assert.equal(saved.entries[2].mandarin, '请把袖子卷起来。', 'stored as written');
-  assert.throws(() => courseCmd(d.dataDir, d.db, 'add', d.doc, '--title', 'Clinic Phrases'), /already exists/);
-  assert.throws(() => courseCmd(d.dataDir, d.db, 'add', path.join(d.dir, 'none.pdf'), '--title', 'X'), /file not found/);
-  assert.match(courseCmd(d.dataDir, d.db, 'activate', 'clinic-phrases'), /"Clinic Phrases" is now the active course/);
-  config = JSON.parse(fs.readFileSync(path.join(d.dataDir, 'courses.json'), 'utf8'));
-  assert.deepEqual(config.courses.map((c) => [c.id, c.status]), [['jh-medics-vol1', 'staged'], ['clinic-phrases', 'active']]);
-  const list = courseCmd(d.dataDir, d.db, 'list');
-  assert.match(list, /staged +jh-medics-vol1 +JH Medics Volume 1 · 385 items/);
-  assert.match(list, /\* ACTIVE +clinic-phrases +Clinic Phrases · 4 items/);
+  assert.match(out, /Added "Clinic Phrases" \(clinic-phrases\) as a waiting course/);
+  assert.ok(fs.existsSync(path.join(d.dir, 'courses', 'clinic-phrases.json')), 'stored next to the database');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(d.dir, 'courses', 'clinic-phrases.json'), 'utf8')).entries[2].mandarin, '请把袖子卷起来。', 'stored as written');
+  assert.ok(!fs.existsSync(path.join(appDir, 'data', 'clinic-phrases.json')), 'the code folder is not touched');
+  let list = courseCmd(d.env, 'list');
+  assert.match(list, /\* ACTIVE +jh-medics-vol1 +JH Medics Volume 1 · item 1 of 385/, 'JH Medics stays the active (default) course');
+  assert.match(list, /waiting +clinic-phrases +Clinic Phrases · item 1 of 4 \(added\)/);
+  assert.match(courseCmd(d.env, 'add', d.doc, '--title', 'Clinic Phrases'), /Added "Clinic Phrases" \(clinic-phrases-2\)/, 'the same name again gets its own id');
+  assert.throws(() => courseCmd(d.env, 'add', path.join(d.dir, 'none.pdf'), '--title', 'X'), /file not found/);
+  assert.throws(() => courseCmd(d.env, 'activate', 'nope'), /There is no course "nope"/);
+  assert.match(courseCmd(d.env, 'activate', 'clinic-phrases'), /"Clinic Phrases" is now the active course \(item 1 of 4\)/);
+  list = courseCmd(d.env, 'list');
+  assert.match(list, /waiting +jh-medics-vol1/);
+  assert.match(list, /\* ACTIVE +clinic-phrases /);
+});
+
+// ---------- courses in the running app ----------
+
+test('server: switching course answers with the new course, its own place and its current item at once; each course keeps its own place; upload adds a course; bad uploads are refused', async () => {
+  const d = freshInstall();
+  const q = await startListenQwen();
+  const s = await startTutorServer(q.port, d.env);
+  const post = (p2, body) => fetch(`${s.url}${p2}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body ?? {}) });
+  const upload = (name, buf, headers = {}) => fetch(`${s.url}/api/courses/upload`, { method: 'POST', headers: { 'Content-Type': 'application/octet-stream', 'X-File-Name': encodeURIComponent(name), ...headers }, body: buf });
+  try {
+    assert.match(s.output(), /Active course: JH Medics Volume 1 \(385 items\), Roy's place: item 1/);
+    assert.match(s.output(), /Summary: version \S+ .*course JH Medics Volume 1 · AI Qwen \S+ · ASR qwen-audio-3\.1-asr-flash · TTS qwen3-tts-instruct-flash \(voice Cherry\)/);
+    // JH Medics: hear items 1 and 2.
+    for (const position of [1, 2]) assert.equal((await post('/api/listen/complete', { position })).status, 200);
+    // Upload a second course (PDF), waiting.
+    const up = await upload('Clinic Phrases.pdf', fs.readFileSync(path.join(FIXTURES, 'course-table.pdf')), { 'X-Course-Title': encodeURIComponent('Clinic <b>Phrases</b>') });
+    assert.equal(up.status, 200);
+    const added = await up.json();
+    assert.equal(added.course.title, 'Clinic b Phrases /b', 'the title is cleaned: no markup');
+    assert.equal(added.course.active, false, 'a new course waits; JH Medics stays active');
+    assert.equal(added.report.items, 4);
+    assert.match(added.report.from, /^PDF table/);
+    assert.equal((await (await fetch(`${s.url}/api/status`)).json()).course.title, 'JH Medics Volume 1');
+    // Switch: everything for the new course in the same answer.
+    const sw = await (await post('/api/courses/active', { id: added.course.id })).json();
+    assert.equal(sw.status.course.title, 'Clinic b Phrases /b');
+    assert.equal(sw.status.position, 1);
+    assert.equal(sw.status.total, 4);
+    assert.equal(sw.card.mandarin, '硬膜外', "the new course's item 1, at once");
+    assert.equal(sw.courses.find((c) => c.active).id, added.course.id);
+    assert.equal((await post('/api/listen/complete', { position: 1 })).status, 200);
+    // Back to JH Medics: its own place (item 3) is kept; the other course keeps item 2.
+    const back = await (await post('/api/courses/active', { id: 'jh-medics-vol1' })).json();
+    assert.deepEqual([back.status.course.title, back.status.position, back.card.mandarin], ['JH Medics Volume 1', 3, '大便']);
+    assert.deepEqual(back.courses.map((c) => [c.id, c.position, c.active]), [['jh-medics-vol1', 3, true], [added.course.id, 2, false]]);
+    // Refusals: scanned PDF, wrong type, too large, empty, unknown course.
+    const scanned = await upload('scan.pdf', fs.readFileSync(path.join(FIXTURES, 'scanned.pdf')));
+    assert.equal(scanned.status, 422);
+    assert.match((await scanned.json()).error, /no readable text: it looks like a scanned image/);
+    assert.equal((await upload('tool.exe', Buffer.from('MZ'))).status, 415);
+    assert.equal((await upload('big.txt', Buffer.alloc(16 * 1024 * 1024, 0x41))).status, 413);
+    assert.equal((await upload('empty.txt', Buffer.alloc(0))).status, 422);
+    assert.equal((await post('/api/courses/active', { id: '../../etc/passwd' })).status, 404);
+    assert.equal((await (await fetch(`${s.url}/api/courses`)).json()).courses.length, 2, 'refused uploads added nothing');
+    // The server restarts with the same database: the choice and places persist.
+    await s.stop();
+    const again = await startTutorServer(q.port, d.env);
+    try {
+      const st = await (await fetch(`${again.url}/api/status`)).json();
+      assert.deepEqual([st.course.title, st.position], ['JH Medics Volume 1', 3]);
+      assert.equal((await (await fetch(`${again.url}/api/courses`)).json()).courses.length, 2, 'the added course is still there');
+    } finally { await again.stop(); }
+  } finally {
+    await s.stop().catch(() => {});
+    await q.close();
+  }
+});
+
+test('server: the access code protects the course routes and the upload too', async () => {
+  const d = freshInstall();
+  const q = await startListenQwen();
+  const s = await startTutorServer(q.port, { ...d.env, TUTOR_ACCESS_CODE: 'letmein' });
+  try {
+    assert.equal((await fetch(`${s.url}/api/courses`)).status, 401);
+    assert.equal((await fetch(`${s.url}/api/courses/active`, { method: 'POST', body: '{"id":"x"}' })).status, 401);
+    assert.equal((await fetch(`${s.url}/api/courses/upload`, { method: 'POST', headers: { 'X-File-Name': 'a.txt' }, body: '挂号 guà hào register' })).status, 401);
+    assert.equal((await fetch(`${s.url}/api/courses`, { headers: { 'X-Access-Code': 'letmein' } })).status, 200);
+    assert.equal((await fetch(`${s.url}/api/version`)).status, 200, 'the version stays readable');
+  } finally {
+    await s.stop();
+    await q.close();
+  }
 });
 
 // ---------- the same teacher for both courses, through the real server ----------
 
 async function runCourse({ activate }) {
-  const d = dataWithJh();
-  courseCmd(d.dataDir, d.db, 'add', d.doc, '--title', 'Clinic Phrases');
-  if (activate) courseCmd(d.dataDir, d.db, 'activate', activate);
+  const d = freshInstall();
+  courseCmd(d.env, 'add', d.doc, '--title', 'Clinic Phrases');
+  if (activate) courseCmd(d.env, 'activate', activate);
   const q = await startListenQwen({ interactive: { asrText: '挂号' } });
-  const s = await startTutorServer(q.port, { TUTOR_DATA_DIR: d.dataDir });
+  const s = await startTutorServer(q.port, d.env);
   try {
     const status = await (await fetch(`${s.url}/api/status`)).json();
     const one = await (await fetch(`${s.url}/api/listen`)).json();

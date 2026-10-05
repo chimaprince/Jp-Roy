@@ -91,8 +91,8 @@ test('continuous: Word 1 ends → Word 2 starts by itself → Word 2 ends → Wo
       'completed 2 -> place 3',
       'started 3',
     ], 'each word starts only after the previous one finished and was recorded');
-    assert.ok(statuses.includes("Word 1 complete. Now let's learn Word 2…"), statuses.join(' | '));
-    assert.ok(statuses.includes("Word 2 complete. Now let's learn Word 3…"));
+    assert.ok(statuses.includes("Item 1 complete. Now let's learn Item 2…"), statuses.join(' | '));
+    assert.ok(statuses.includes("Item 2 complete. Now let's learn Item 3…"));
     assert.ok(!statuses.some((t) => /Finished this word|→ Next for the next word/.test(t)), 'no "click Next" message');
     assert.equal(await place(s.url), 3, 'Interactive Practice is at word 3 too');
     assert.equal(q.seen.teacherTurns, 0);

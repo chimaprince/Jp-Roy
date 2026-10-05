@@ -5,9 +5,11 @@ import https from 'node:https';
 import OpenAI from 'openai'; // HTTP client for Qwen's OpenAI-compatible API (error types)
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { openDb, activeCourse, entryAt, getListenContent, saveListenContent } from './src/db.js';
-import { loadConfiguredCourses } from './src/curriculum.js';
+import { createCatalog } from './src/courses.js';
+import { DOCUMENT_TYPES, MAX_DOCUMENT_BYTES } from './src/documents.js';
 import { createTeacher } from './src/teacher.js';
 import { Tutor } from './src/tutor.js';
 import { serverUrls } from './src/network.js';
@@ -34,15 +36,27 @@ const DEV_CA = process.env.TUTOR_DEV_CA || '';
 const SETUP_PORT = process.env.TUTOR_SETUP_PORT || '3000';
 const DEV_CA_FINGERPRINT = process.env.TUTOR_DEV_CA_FINGERPRINT || '';
 
-const db = openDb(process.env.TUTOR_DB || path.join(here, 'tutor.db'));
-// The courses (data/courses.json): any number of course documents, one active
-// at a time; every course is taught by the same teacher. TUTOR_DATA_DIR points
-// to another data folder (tests use this).
-const dataDir = path.resolve(process.env.TUTOR_DATA_DIR || path.join(here, 'data'));
-for (const r of loadConfiguredCourses(db, dataDir)) {
-  if (!r.ok) { console.error(`Curriculum ${r.course} failed to load:`, r.errors); process.exit(1); }
-  console.log(`Curriculum ${r.course}: ${r.count} entries`);
-  r.warnings.forEach((w) => console.warn(`  note: ${w}`));
+// ':memory:' (tests) stays an in-memory database, never a file of that name.
+const inMemory = process.env.TUTOR_DB === ':memory:';
+const dbFile = inMemory ? ':memory:' : path.resolve(process.env.TUTOR_DB || path.join(here, 'tutor.db'));
+const db = openDb(dbFile);
+// The courses: built-in ones (data/courses.json; TUTOR_DATA_DIR for another
+// folder) and documents Roy added (next to the database, TUTOR_COURSES_DIR).
+// One active course at a time, stored in the database; every course is taught
+// by the same teacher.
+const catalog = createCatalog({
+  db,
+  builtinDir: path.resolve(process.env.TUTOR_DATA_DIR || path.join(here, 'data')),
+  userDir: path.resolve(process.env.TUTOR_COURSES_DIR || (inMemory ? fs.mkdtempSync(path.join(os.tmpdir(), 'roy-courses-')) : path.join(path.dirname(dbFile), 'courses'))),
+});
+for (const r of catalog.load()) {
+  if (!r.ok) {
+    if (r.builtin) { console.error(`Course ${r.course} failed to load:`, r.errors); process.exit(1); }
+    console.error(`Added course ${r.course} could not be loaded (skipped): ${r.errors.join('; ')}`);
+    continue;
+  }
+  const notes = r.warnings.length ? ` (${r.warnings.length} notes: items without pinyin, English or meaning)` : '';
+  console.log(`Course ${r.course}: ${r.count} items${notes}`);
 }
 const pkg = JSON.parse(fs.readFileSync(path.join(here, 'package.json'), 'utf8'));
 const teacher = createTeacher();
@@ -83,6 +97,14 @@ if (asrEndpointProblem(voice.asrURL)) console.error(`  ${asrEndpointProblem(voic
 console.log(`teacher voice: Qwen ${voice.ttsModel} (voice ${voice.ttsVoice}) at ${voice.ttsURL}`);
 console.log(`teacher voice requests: one at a time, 429 retried after ${speech.retryDelays.join(' / ')} ms; audio cache: ${audioCache ?? 'off'}`);
 const tutor = new Tutor({ db, teacher, userId: process.env.TUTOR_USER_ID || 'roy', userName: process.env.TUTOR_USER_NAME || 'Roy' });
+{
+  const all = catalog.list();
+  const active = all.find((c) => c.active);
+  console.log(`Active course: ${active ? `${active.title} (${active.items} items), Roy's place: item ${active.position}` : 'none'}`);
+  const others = all.filter((c) => !c.active);
+  if (others.length) console.log(`Other courses: ${others.map((c) => `${c.title} (item ${c.position} of ${c.items})`).join('; ')}`);
+  console.log(`Summary: version ${pkg.version}${commit ? ` (commit ${commit})` : ''} · course ${active?.title ?? 'none'} · AI Qwen ${teacher.model} · ASR ${voice.asrModel} · TTS ${voice.ttsModel} (voice ${voice.ttsVoice})`);
+}
 
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml' };
 const SECURITY_HEADERS = {
@@ -142,7 +164,42 @@ const routes = {
     language: typeof body.language === 'string' ? body.language.slice(0, 20) : null,
   })),
   'POST /api/session/end': async () => withVoice(await tutor.end()),
+  // Courses: the list (each with its own place), and switching course. The
+  // switch answers with everything the page shows, so it updates at once.
+  'GET /api/courses': () => ({ courses: catalog.list() }),
+  'POST /api/courses/active': async (body) => {
+    catalog.activate(String(body.id ?? ''));
+    return coursesView();
+  },
 };
+
+// The course list, the status and the current item's card (text only).
+async function coursesView() {
+  const status = { ...tutor.status(), version: pkg.version, commit };
+  const position = Math.min(status.position ?? 1, status.total ?? 1);
+  const home = status.total ? await listenRoute(new URL(`http://local/api/listen?audio=0&position=${position}`)) : null;
+  return { courses: catalog.list(), status, card: home?.card ?? null };
+}
+
+// POST /api/courses/upload  raw document body; X-File-Name, X-Course-Title
+// (URI-encoded), X-Activate: 1 to switch to it at once. Size and type checked.
+async function uploadRoute(req) {
+  const name = decodeURIComponent(String(req.headers['x-file-name'] ?? '')).slice(0, 200);
+  const title = decodeURIComponent(String(req.headers['x-course-title'] ?? '')).slice(0, 200);
+  const ext = path.extname(name).toLowerCase();
+  if (!DOCUMENT_TYPES.includes(ext)) { req.resume(); throw Object.assign(new Error(`Unsupported file type ${ext || '(none)'}. Use PDF, Word (.docx), text (.txt), CSV, TSV or JSON.`), { status: 415 }); }
+  const declared = Number(req.headers['content-length'] ?? 0);
+  if (declared > MAX_DOCUMENT_BYTES) { req.resume(); throw Object.assign(new Error('The file is too large (over 15 MB).'), { status: 413 }); }
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > MAX_DOCUMENT_BYTES) throw Object.assign(new Error('The file is too large (over 15 MB).'), { status: 413 });
+    chunks.push(chunk);
+  }
+  const added = await serial(() => catalog.add({ name, buffer: Buffer.concat(chunks), title, activate: req.headers['x-activate'] === '1' }));
+  return { ...added, ...(await coursesView()) };
+}
 
 // Listen & Learn. It shares Roy's curriculum position with Interactive
 // Practice (see Tutor.listenPlan / completeByListening). Fetching a lesson
@@ -256,8 +313,37 @@ async function audioRoute(req, res, url) {
   return false;
 }
 
+// Basic abuse protection per client address: API calls per minute, and
+// document uploads per 10 minutes. Generous for one learner.
+const RATE = { api: { limit: Number(process.env.TUTOR_RATE_PER_MIN) || 900, windowMs: 60_000 }, upload: { limit: 10, windowMs: 600_000 } };
+const hits = new Map();
+function rateLimited(kind, ip) {
+  const { limit, windowMs } = RATE[kind];
+  const key = `${kind}:${ip}`;
+  const now = Date.now();
+  const h = hits.get(key);
+  if (!h || now - h.start > windowMs) { hits.set(key, { start: now, n: 1 }); return false; }
+  h.n += 1;
+  if (hits.size > 5000) hits.clear();
+  return h.n > limit;
+}
+
 async function handler(req, res) {
   const url = new URL(req.url, 'http://localhost');
+  if (url.pathname.startsWith('/api/') && rateLimited('api', req.socket.remoteAddress)) {
+    req.resume();
+    return send(res, 429, { error: 'Too many requests. Wait a minute and try again.', code: 'rate_limited' });
+  }
+  if (req.method === 'POST' && url.pathname === '/api/courses/upload') {
+    if (ACCESS_CODE && req.headers['x-access-code'] !== ACCESS_CODE) { req.resume(); return send(res, 401, { error: 'Access code required' }); }
+    if (rateLimited('upload', req.socket.remoteAddress)) { req.resume(); return send(res, 429, { error: 'Too many uploads. Wait a few minutes and try again.', code: 'rate_limited' }); }
+    try {
+      return send(res, 200, await uploadRoute(req));
+    } catch (err) {
+      if (!err.status) console.error(err);
+      return send(res, err.status ?? 500, { error: err.status ? err.message : 'The document could not be added.', code: 'course_upload_failed' });
+    }
+  }
   const route = routes[`${req.method} ${url.pathname}`];
   const isVoice = url.pathname.startsWith('/api/voice/');
   const isListen = (req.method === 'GET' && url.pathname === '/api/listen') || (req.method === 'POST' && url.pathname === '/api/listen/complete');
@@ -292,8 +378,16 @@ async function handler(req, res) {
       if (err.status === 413) req.resume();
       return send(res, err.status, { error: err.message, code: err.code });
     }
+    if (err instanceof SyntaxError) return send(res, 400, { error: 'The request was not valid JSON.', code: 'bad_request' });
+    if (!(err instanceof OpenAI.APIError) && err.status >= 400 && err.status < 500) return send(res, err.status, { error: err.message, code: err.code ?? null });
     console.error(err);
     if (err.code === 'ai_not_configured') return send(res, 503, { error: err.message, code: err.code });
+    if (err instanceof OpenAI.APIError && (err.status === 401 || err.status === 403)) {
+      return send(res, 502, { error: 'Qwen did not accept the API key (authentication failed). Check DASHSCOPE_API_KEY in roy-tutor/.env and restart. Nothing was counted.', code: 'ai_auth_failed' });
+    }
+    if (err instanceof OpenAI.APIError && err.status === 429) {
+      return send(res, 503, { error: 'Qwen is limiting requests right now (rate limit). Wait a moment and try again. Nothing was counted.', code: 'ai_rate_limited' });
+    }
     if (err.code === 'ai_bad_reply') {
       return send(res, 502, { error: 'The AI teacher (Qwen) sent an unusable reply. Nothing was counted; try again.', code: 'ai_request_failed' });
     }

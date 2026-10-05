@@ -1,6 +1,6 @@
 {
   "name": "roy-medical-chinese-tutor",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
   "description": "Voice-first medical Chinese tutor for Roy: one permanent AI teacher for any course document (first course: JH Medics Volume 1).",
   "type": "module",
@@ -20,6 +20,7 @@
   "dependencies": {
     "node-forge": "^1.4.0",
     "openai": "^7.23.0",
+    "pdfjs-dist": "^4.10.38",
     "pinyin-pro": "^3.29.4"
   }
 }

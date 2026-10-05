@@ -288,27 +288,27 @@ and audio still arriving after Next is never played.
 Play is continuous. When the last line of a word's audio has played to its end
 (the audio `ended` event, not a timer), that word is recorded as completed and,
 after a short pause, the next one starts by itself. The status line shows
-"Word 1 complete. Moving to Word 2…". There is no "press Next" step: Next is
+"Item 1 complete. Now let's learn Item 2…". There is no "press Next" step: Next is
 only there to skip. Pause, Repeat and loading never complete or advance
 anything; Next skips a word without completing it.
 
 The line above the lesson says which word is playing and how it relates to your
-place: "Now teaching: Word 2 of 385", or after a skip "Now playing: Word 3 of 385,
-ahead of your place · your place stays at Word 1 (skipped, not completed yet)".
+place: "Now teaching: Item 2 of 385", or after a skip "Now playing: Item 3 of 385,
+ahead of your place · your place stays at Item 1 (skipped, not completed yet)".
 The Progress line always shows your one shared place.
 
 If a line's audio cannot be played (Qwen TTS failed, network), the player stops
-on that line: "Word 1: this line's audio could not be played, so Word 1 is not
-complete. ▶ Play tries again · → Next skips it." ▶ Play asks Qwen for that line
-again and carries on. If a finished word cannot be saved, the player also stops
-and ▶ Play saves it.
+on that line: "Audio temporarily unavailable. Item 1 is not complete. ↻ Retry
+plays it again · → Next skips it." Retry asks Qwen for that line again and
+carries on. If a finished item cannot be saved, the player also stops and Retry
+saves it.
 
 A clip only counts as finished when the audio element has really played to its
 end (`ended` while the element holds that clip). Duplicate, stray or late
 `ended` events, and anything from a clip that Pause, Repeat, Next or Exit
 cancelled, are ignored, so nothing can skip a clip or a word.
 
-The page shows its version under the title ("Version 1.1.0 (commit 1a2b3c4)")
+The page shows its version under the title ("Version 1.2.0 (commit 1a2b3c4)")
 and at the bottom. `https://localhost:3443/api/version` returns the same version
 and commit, and the server prints them at startup together with the folder it
 serves the page from. If the page and the server differ, a notice says so.
@@ -385,7 +385,7 @@ servers that check every request. The tests cover:
   fallback, auto-advance, Next, Repeat, Pause/Resume, network pause. Continuous
   play is also tested against the real server (`test/listen-flow.test.js`) and in
   real Chromium (`test/browser.test.js`). It clicks Listen & Learn once and
-  expects Word 1 → 2 → 3 with no further clicks, the real audio `ended` events
+  expects Item 1 → 2 → 3 with no further clicks, the real audio `ended` events
   and the progress line following. It also covers Pause, Resume, Repeat, Next,
   an audio failure and its retry, the whole sequence ending in Interactive
   Practice at the same place, and a spoken answer through Chromium's fake
@@ -440,7 +440,15 @@ teaches it fully: explanation, practical usage, example sentence, translation,
 medical and interpreter situation, dialogue. That material is generated, kept
 separate, and labelled as the AI teacher's, never as the document's.
 
-**Add a course** (in `roy-tutor`, with the tutor stopped):
+**Add a course on the page** (the easiest way): open **Courses** under the
+title, choose the file, give it a name, tick "Start studying it now" if you
+want, and press **Add course**. The page reports how many items it found and
+how many have no pinyin, English or meaning. Each listed course shows its own
+place ("Item 12 of 385"); **Study this course** switches at once: the title,
+progress and current item change without reloading, and the course you left
+keeps its place. JH Medics Volume 1 stays the default course until you switch.
+
+**Or from the command line** (in `roy-tutor`, with the tutor stopped):
 
 ```
 npm run course -- add "C:\path\to\JH Medics Volume 2.docx" --title "JH Medics Volume 2"
@@ -448,21 +456,51 @@ npm run course -- list
 npm run course -- activate jh-medics-volume-2
 ```
 
-- `add` reads the document, shows how many items it found (and the first ones),
-  saves it as `data/<id>.json`, lists it in `data/courses.json` and loads it.
-  It is **waiting**, not active: the course being studied never changes by
-  itself. Add `--activate` to switch at once.
+- `add` reads the document, shows how many items it found (and the first ones)
+  and loads it. Added courses are kept **next to the database**, in
+  `courses/` beside `tutor.db` (or `TUTOR_COURSES_DIR`), never in the code
+  folder, so updating the app never touches them. A new course is **waiting**,
+  not active: the course being studied never changes by itself. Add
+  `--activate` to switch at once.
 - `activate` makes one course the active one. Every course keeps its own place
   and progress; switching back continues where you stopped.
-- Documents it reads: **.docx** (a table with one item per row, in any column
-  order, with or without headers; or one item per paragraph), **.txt** (one item
-  per line: `挂号 guà hào register: meaning`), **.csv / .tsv**, **.json**. A
-  **.pdf** cannot be read reliably: open it in Word, save as .docx, add that.
-- The same reader rebuilds JH Medics Volume 1 from its original Word file
-  exactly (385 of 385 entries; a test checks this).
+- Documents it reads (up to 15 MB): **.pdf** with real text (a table with one
+  item per row, or one item per line), **.docx** (a table with one item per row,
+  in any column order, with or without headers; or one item per paragraph),
+  **.txt** (one item per line: `挂号 guà hào register: meaning`), **.csv /
+  .tsv**, **.json**.
+- A **scanned PDF** (pictures of pages, no text inside) is refused with "This
+  PDF has no readable text: it looks like a scanned image. It needs OCR…".
+  Nothing is imported and nothing is guessed. Run it through OCR first, or add
+  the Word or text version.
+- The same reader rebuilds JH Medics Volume 1 exactly (385 of 385 entries)
+  from its original Word file and from a PDF of the same table; tests check
+  both.
 - Nothing in a document is corrected or invented. A missing pinyin, English or
-  meaning stays missing (the page says "no pinyin in the source"), and `add`
-  reports how many are missing.
+  meaning stays missing (the page says "no pinyin in the source"), and the
+  report counts them.
+- Uploads need the access code when `TUTOR_ACCESS_CODE` is set, only accept
+  the file types above, are size-limited and rate-limited, and are stored
+  under a generated id (the file name is never used as a path).
+
+## Production readiness (private beta)
+
+For Roy's private, single-user beta the current storage is right: one SQLite
+file (`tutor.db`) for progress and sessions, added courses in `courses/` next
+to it, and the TTS audio cache in `audio-cache/`. Back up `tutor.db` and
+`courses/` to keep progress and added courses.
+
+If it is ever hosted rather than run on the laptop:
+- put `TUTOR_DB`, `TUTOR_COURSES_DIR` and `TUTOR_AUDIO_CACHE` on a persistent
+  disk (a container's own filesystem is wiped on redeploy);
+- keep `TUTOR_ACCESS_CODE` set and serve over HTTPS;
+- run one server process (SQLite and the TTS queue are per process);
+- the `DASHSCOPE_API_KEY` stays in the server's environment only; the page
+  never receives it.
+
+The startup log prints one summary line: version, commit, active course, AI
+provider and model, ASR model and TTS model. `/api/version` returns the
+running version and commit; the page shows the same under the title.
 
 ## Curriculum
 
