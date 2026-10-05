@@ -231,6 +231,9 @@ test('server: the access code protects the course routes and the upload too', as
     assert.equal((await fetch(`${s.url}/api/courses/upload`, { method: 'POST', headers: { 'X-File-Name': 'a.txt' }, body: '挂号 guà hào register' })).status, 401);
     assert.equal((await fetch(`${s.url}/api/courses`, { headers: { 'X-Access-Code': 'letmein' } })).status, 200);
     assert.equal((await fetch(`${s.url}/api/version`)).status, 200, 'the version stays readable');
+    const health = await fetch(`${s.url}/health`);
+    assert.equal(health.status, 200, 'the host health check needs no access code');
+    assert.deepEqual(Object.keys(await health.json()).sort(), ['ok', 'version'], 'health says nothing else');
   } finally {
     await s.stop();
     await q.close();

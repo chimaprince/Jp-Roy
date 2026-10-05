@@ -1,0 +1,44 @@
+# Render Blueprint: Roy Medical Chinese Tutor (private beta).
+# New > Blueprint > this repository; Render asks for the secret values below.
+services:
+  - type: web
+    name: roy-medical-chinese-tutor
+    runtime: node
+    rootDir: roy-tutor
+    branch: claude/great-mendel-wolegk
+    plan: starter # a persistent disk needs a paid instance
+    buildCommand: npm ci
+    startCommand: npm start # plain HTTP on $PORT; Render provides HTTPS
+    healthCheckPath: /health
+    autoDeploy: false
+    disk:
+      # Progress, sessions and reviews (tutor.db), uploaded courses (courses/)
+      # and the audio cache (audio-cache/) all live next to TUTOR_DB.
+      name: roy-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: TUTOR_DB
+        value: /var/data/tutor.db
+      - key: TUTOR_TIMEZONE
+        value: Asia/Singapore
+      - key: QWEN_BASE_URL
+        value: https://dashscope-intl.aliyuncs.com/compatible-mode/v1
+      - key: QWEN_MODEL
+        value: qwen-flash-character
+      - key: QWEN_ASR_MODEL
+        value: qwen-audio-3.1-asr-flash
+      - key: QWEN_TTS_MODEL
+        value: qwen3-tts-instruct-flash
+      - key: QWEN_TTS_VOICE
+        value: Cherry
+      # Secrets: entered in the Render dashboard, never committed.
+      - key: DASHSCOPE_API_KEY
+        sync: false
+      - key: TUTOR_ACCESS_CODE # required: the URL is on the public internet
+        sync: false
+      # Only if your ASR needs your Singapore workspace host (as in your laptop .env):
+      - key: QWEN_ASR_BASE_URL
+        sync: false

@@ -498,6 +498,19 @@ If it is ever hosted rather than run on the laptop:
 - the `DASHSCOPE_API_KEY` stays in the server's environment only; the page
   never receives it.
 
+**Render (private beta).** `render.yaml` in the repository root is a Render
+Blueprint: in Render choose New > Blueprint, pick this repository, and enter
+the secrets when asked: `DASHSCOPE_API_KEY`, `TUTOR_ACCESS_CODE` (required: the
+URL is public) and, only if your ASR needs it, `QWEN_ASR_BASE_URL` (your
+Singapore workspace host, as in the laptop `.env`). It builds with `npm ci`,
+starts with `npm start` (plain HTTP on Render's `PORT`; Render provides HTTPS,
+so no development certificate), checks `GET /health`, and puts `tutor.db`,
+`courses/` and `audio-cache/` on a 1 GB persistent disk at `/var/data`
+(`TUTOR_DB=/var/data/tutor.db`), so progress and uploaded courses survive
+restarts and redeploys. The audio cache is only a cache: anything missing is
+generated again. A disk needs a paid instance (Starter). Auto-deploy is off:
+deploy a commit on purpose, then check `/api/version`.
+
 The startup log prints one summary line: version, commit, active course, AI
 provider and model, ASR model and TTS model. `/api/version` returns the
 running version and commit; the page shows the same under the title.

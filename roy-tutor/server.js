@@ -63,7 +63,9 @@ const teacher = createTeacher();
 // Which code is running: the version, the git commit and the folder the page
 // is served from (an old copy of the project elsewhere shows up here).
 const commit = (() => {
-  try { return execSync('git rev-parse --short HEAD', { cwd: here, stdio: ['ignore', 'pipe', 'ignore'], encoding: 'utf8' }).trim() || null; } catch { return null; }
+  try { return execSync('git rev-parse --short HEAD', { cwd: here, stdio: ['ignore', 'pipe', 'ignore'], encoding: 'utf8' }).trim() || null; } catch {
+    return process.env.RENDER_GIT_COMMIT?.slice(0, 7) || null; // Render's build may have no .git folder
+  }
 })();
 console.log(`Roy Medical Chinese tutor ${pkg.version}${commit ? ` (commit ${commit})` : ''}`);
 console.log(`Serving the page from: ${publicDir}`);
@@ -359,6 +361,8 @@ async function handler(req, res) {
       return send(res, err.status ?? 500, { error: err.status ? err.message : 'Something went wrong' });
     }
   }
+  // Liveness for the host (Render health check): cheap, no Qwen call, no access code.
+  if (req.method === 'GET' && url.pathname === '/health') return send(res, 200, { ok: true, version: pkg.version });
   // Which version is running (no access code needed: version and commit only).
   if (req.method === 'GET' && url.pathname === '/api/version') return send(res, 200, { version: pkg.version, commit });
   if (!route && !isVoice) return req.method === 'GET' ? serveStatic(req, res) : send(res, 404, { error: 'Not found' });
